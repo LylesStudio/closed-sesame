@@ -6,13 +6,6 @@ ClosedSesame 是一个使用 Rust 编写的加密文件容器实验项目。文�
 
 项目仍处于早期阶段；请勿把唯一副本只保存在容器中。
 
-## 宣传片
-
-`v0.1.0` release 附带已经完成的宣传片：
-
-- [English promo video（MP4）](https://github.com/Silver-Aurora/closed-sesame/releases/download/v0.1.0/closed-sesame-promo-en.mp4)
-- [中文宣传片（MP4）](https://github.com/Silver-Aurora/closed-sesame/releases/download/v0.1.0/closed-sesame-promo-zh.mp4)
-
 ## 国际化
 
 运行时界面与 CLI 支持 **英语**、**简体中文**、**日语**。

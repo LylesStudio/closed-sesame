@@ -6,13 +6,6 @@ ClosedSesame は Rust で書かれた暗号化ファイルコンテナの実験�
 
 プロジェクトはまだ初期段階です。唯一のコピーをコンテナ内だけに置かないでください。
 
-## デモ動画
-
-`v0.1.0` リリースに完成したプロモーション動画を収録しています:
-
-- [English promo video (MP4)](https://github.com/Silver-Aurora/closed-sesame/releases/download/v0.1.0/closed-sesame-promo-en.mp4)
-- [中文宣传片（MP4）](https://github.com/Silver-Aurora/closed-sesame/releases/download/v0.1.0/closed-sesame-promo-zh.mp4)
-
 ## 国際化（i18n）
 
 実行時 UI と CLI は **英語**、**簡体字中国語**、**日本語** に対応しています。

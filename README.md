@@ -6,13 +6,6 @@ ClosedSesame is an experimental encrypted file container written in Rust. Files 
 
 The project is still early; do not keep your only copy inside a container.
 
-## Demo video
-
-The v0.1.0 release includes the finished promo videos:
-
-- [English promo video (MP4)](https://github.com/Silver-Aurora/closed-sesame/releases/download/v0.1.0/closed-sesame-promo-en.mp4)
-- [中文宣传片（MP4）](https://github.com/Silver-Aurora/closed-sesame/releases/download/v0.1.0/closed-sesame-promo-zh.mp4)
-
 ## Current capabilities
 
 Status legend: **implemented** means the code path exists; **build-verified** means the platform has been built/tested in CI; **runtime-verified** means real mount and file access were tested. These are not interchangeable. **Roadmap** means not done yet.
