@@ -281,6 +281,7 @@ fn reject(path: PathBuf, reason: impl Into<String>) -> AddOutcome {
     }
 }
 
+#[cfg(debug_assertions)]
 pub(crate) fn add_many(
     session: &Session,
     paths: impl IntoIterator<Item = PathBuf>,
