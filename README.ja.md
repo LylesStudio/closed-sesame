@@ -50,7 +50,7 @@ sesame --lang ja list treasure.sesame
 
 抽出は既定で**コピー**です。コンテナ内のファイルは残ります。`sesame extract --move` は検証済みの書き出し後にコンテナから削除します（隠された `--keep` は互換のための無操作です）。GUI の「移出」は別の確認です。`sesame passwd` はマスターキーの包み直しだけでファイル頁は書き換えません（新しいパスワードを空のまま確認するとパスワードなしになります）。`sesame grow --by 1GB` は容量をその場で拡張します（4 MiB ブロックへ切り上げ）。能力とリスクの正本は [STATUS.md](STATUS.md) です。
 
-Windows でマウントする前に [WinFsp 2.x](https://github.com/winfsp/winfsp/releases)（Core + Developer）をインストールしてください。**macOS は組み込み loopback WebDAV ブリッジでマウントします**（GUI のマウントボタン、または CLI `sesame mount --webdav`）。Finder がネイティブ接続し、カーネル拡張は不要です。Linux はシステムの FUSE スタック（`/dev/fuse`）を使用し、デフォルトで**書き込み可能**です。
+Windows でマウントする前に [WinFsp 2.x ランタイム](https://winfsp.dev/rel) を別途インストールしてください。Developer コンポーネントは ClosedSesame をソースからビルドする場合だけ必要です。**macOS は組み込み loopback WebDAV ブリッジでマウントします**（GUI のマウントボタン、または CLI `sesame mount --webdav`）。Finder がネイティブ接続し、カーネル拡張は不要です。Linux はシステムの FUSE スタック（`/dev/fuse`）を使用し、デフォルトで**書き込み可能**です。
 
 ```powershell
 cargo test --no-default-features --features mount --test winfsp_mount_tests -- --nocapture

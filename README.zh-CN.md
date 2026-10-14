@@ -72,7 +72,7 @@ sesame mount treasure.sesame /mnt/treasure
 
 CLI 和恢复工具从终端读取密码时不回显，并在操作结束后尽快清理密码字符串。读取无密码容器时，`verify`、`list`、`mount`、`add`、`extract` 和 `remove` 接受 `--no-password`。挂载成功后 CLI 会等待用户按 Enter，再显式卸载；`defrag` 当前总会提示密码且没有无密码参数。
 
-Windows 运行挂载前需从 [WinFsp 官方发布页](https://github.com/winfsp/winfsp/releases) 另行安装 WinFsp 2.x（Core + Developer）。**macOS 通过内置 loopback WebDAV 桥挂载**（GUI 挂载按钮，或 CLI `sesame mount --webdav`）；Finder 原生连接，无需内核扩展。Linux 需系统 FUSE 栈（`/dev/fuse`），默认**可写**挂载。
+Windows 运行挂载前需从 [WinFsp 官方发布页](https://winfsp.dev/rel) 另行安装 WinFsp 2.x 运行时。Developer 组件仅在从源码构建 ClosedSesame 时需要。**macOS 通过内置 loopback WebDAV 桥挂载**（GUI 挂载按钮，或 CLI `sesame mount --webdav`）；Finder 原生连接，无需内核扩展。Linux 需系统 FUSE 栈（`/dev/fuse`），默认**可写**挂载。
 
 读出默认为**复制**：文件留在容器里。`sesame extract --move` 在校验写出后才从容器删除（隐藏的 `--keep` 无效果，只为兼容旧命令）。GUI「移出」是单独确认；「打开」解密到会话缓存并监听修改，关闭后自动写回容器，冲突时提供时间戳自动更名保护。`sesame passwd` 只重包主密钥、不重写文件页（新密码留空并确认则改为无密码）；`sesame grow --by 1GB` 就地扩容（向上取整到 4 MiB 块）。能力状态与风险以 [STATUS.md](STATUS.md) 为准。
 

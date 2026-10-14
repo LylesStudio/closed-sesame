@@ -54,7 +54,7 @@ sesame --lang zh-CN list treasure.sesame
 
 Password prompts are hidden and zeroized after use. Use `--no-password` for no-password containers where supported. After a successful CLI mount, press Enter to unmount.
 
-Windows mounting requires [WinFsp 2.x](https://github.com/winfsp/winfsp/releases) (Core + Developer) installed separately. **macOS mounts via the built-in loopback WebDAV bridge** (`sesame mount --webdav`, default in the GUI on macOS); Finder connects natively, no kernel extension needed. Linux uses the system FUSE stack (`/dev/fuse`) and mounts **writable** by default.
+Windows mounting requires the [WinFsp 2.x runtime](https://winfsp.dev/rel) installed separately. The Developer component is only needed when building ClosedSesame from source. **macOS mounts via the built-in loopback WebDAV bridge** (`sesame mount --webdav`, default in the GUI on macOS); Finder connects natively, no kernel extension needed. Linux uses the system FUSE stack (`/dev/fuse`) and mounts **writable** by default.
 
 Extract defaults to **copy**: the file stays in the container. `sesame extract --move` removes it after a verified write (the hidden `--keep` flag is a no-op kept for old commands). GUI "Move out" is a separate confirmation; "Open" decrypts to a per-session cache, watches edits, and writes changes back into the vault on close, with timestamped conflict protection. `sesame passwd` changes the password without rewriting file pages (confirm an empty password to remove it); `sesame grow --by 1GB` extends capacity in place (rounded up to 4 MiB blocks). See [STATUS.md](STATUS.md) for the authoritative capability/risk record.
 
