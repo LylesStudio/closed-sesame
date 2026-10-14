@@ -1,0 +1,2 @@
+*.msi binary
+*.msi -text -diff

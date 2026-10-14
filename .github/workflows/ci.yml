@@ -1,0 +1,77 @@
+name: ClosedSesame CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-quality:
+    name: Linux quality gates
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfuse3-dev \
+            pkg-config \
+            libgtk-3-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-x11-dev
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-1.92.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-1.92.0-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check locale key parity
+        run: python3 scripts/check_locales.py
+
+      - name: Run Clippy quality gate
+        run: cargo clippy --all-targets --locked --no-default-features --features cli,mount,recover -- -D warnings
+
+      - name: Run full test suite
+        env:
+          PROPTEST_CASES: "32"
+        run: cargo test --locked --all-features
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --locked --no-default-features --features cli,mount --bin sesame
+          cargo build --release --locked --no-default-features --features recover --bin sesame-recover
+          cargo build --release --locked --no-default-features --features gui-mount --bin sesame-gui
+
+      - name: Run real Linux FUSE tests when available
+        shell: bash
+        run: |
+          if [ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]; then
+            cargo test --locked --no-default-features --features mount --test fuse_mount_tests -- --nocapture
+          else
+            echo "::notice::SKIP real FUSE tests: /dev/fuse is unavailable on this runner"
+          fi

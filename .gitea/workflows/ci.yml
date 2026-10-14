@@ -1,0 +1,221 @@
+name: ClosedSesame CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security:
+    name: Dependency security audit
+    runs-on: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit Rust dependencies
+        run: cargo audit
+
+  linux:
+    name: Linux CI
+    runs-on: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfuse3-dev \
+            pkg-config \
+            libgtk-3-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-x11-dev
+
+      # Keep this version aligned with rust-toolchain.toml.
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-1.92.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-1.92.0-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check locale key parity
+        run: python3 scripts/check_locales.py
+
+      - name: Test i18n
+        run: cargo test --locked --no-default-features --test i18n_tests
+
+      - name: Clippy quality gate
+        run: cargo clippy --all-targets --locked --no-default-features --features cli,mount,recover -- -D warnings
+
+      - name: Test core library
+        env:
+          # General property tests use more cases in CI. Argon2-heavy
+          # properties keep their own small fixed case count in the test.
+          PROPTEST_CASES: "32"
+        run: |
+          cargo test --locked --no-default-features --lib \
+            --test container_tests \
+            --test crypto_tests \
+            --test deletion_defrag_tests \
+            --test fuzz_tests \
+            --test reader_tests \
+            --test write_tests
+
+      - name: Check recovery tool (minimal dependencies)
+        run: cargo check --locked --no-default-features --features recover --bin sesame-recover
+
+      - name: Test recovery CLI end to end
+        run: cargo test --locked --no-default-features --features recover --test recover_tests
+
+      - name: Check GUI
+        run: cargo check --locked --no-default-features --features gui --bin sesame-gui
+
+      - name: Check Unix CLI and mount support
+        run: cargo check --locked --no-default-features --features cli,mount --bin sesame
+
+      - name: Test CLI end to end
+        run: cargo test --locked --no-default-features --features cli,mount --test cli_tests
+
+      - name: Test shared VFS and Linux platform detection
+        run: "cargo test --locked --no-default-features --features mount --lib mount::"
+
+      - name: Test real Linux FUSE mount when available
+        shell: bash
+        run: |
+          if [ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]; then
+            cargo test --locked --no-default-features --features mount --test fuse_mount_tests -- --nocapture
+          else
+            echo "::notice::SKIP real FUSE tests: /dev/fuse is not a readable/writable character device on this runner"
+          fi
+
+  windows:
+    name: Windows build and unit tests
+    # Requires a Gitea Actions runner registered with the exact `windows` label.
+    # WinFsp is deliberately not installed or started by this job.
+    runs-on: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-1.92.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-1.92.0-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check locale key parity
+        run: python scripts/check_locales.py
+
+      - name: Check core library
+        run: cargo check --locked --no-default-features --lib
+
+      - name: Check GUI
+        run: cargo check --locked --no-default-features --features gui --bin sesame-gui
+
+      - name: Check recovery tool
+        run: cargo check --locked --no-default-features --features recover --bin sesame-recover
+
+      - name: Check CLI and WinFsp adapter
+        run: cargo check --locked --no-default-features --features cli,mount --bin sesame
+
+      - name: Test shared VFS
+        run: cargo test --locked --no-default-features --features mount --lib mount::vfs::tests
+
+      - name: Test Windows adapter without mounting
+        run: cargo test --locked --no-default-features --features mount --lib mount::windows::tests
+
+  macos:
+    name: macOS core builds
+    # Requires a Gitea Actions runner registered with the exact `macos` label.
+    # This job does not claim macFUSE runtime or real mounting.
+    runs-on: macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-1.92.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-1.92.0-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check locale key parity
+        run: python3 scripts/check_locales.py
+
+      - name: Check core library
+        run: cargo check --locked --no-default-features --lib
+
+      - name: Check GUI
+        run: cargo check --locked --no-default-features --features gui --bin sesame-gui
+
+      - name: Check recovery tool
+        run: cargo check --locked --no-default-features --features recover --bin sesame-recover
+
+  macos-mount:
+    name: macOS WebDAV mount build
+    # Compiles the mount code (WebDAV bridge) on a macOS runner.
+    # fuse_mount_tests are Linux-only; WebDAV is covered by webdav_tests.
+    runs-on: macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Check macOS mount code (WebDAV bridge)
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig
+        run: cargo check --locked --no-default-features --features cli,mount --bin sesame
+
+      - name: Test shared VFS and platform detection
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig
+        run: "cargo test --locked --no-default-features --features mount --lib mount::"
+
+      - name: Test WebDAV bridge
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig
+        run: cargo test --locked --no-default-features --features mount --test webdav_tests -- --nocapture

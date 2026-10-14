@@ -1,0 +1,67 @@
+name: ClosedSesame Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    name: Build release artifacts
+    strategy:
+      matrix:
+        include:
+          - os: windows
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: linux
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux GUI dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libgl1-mesa-dev pkg-config
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} \
+            --no-default-features --features cli,mount --bin sesame
+          cargo build --release --locked --target ${{ matrix.target }} \
+            --no-default-features --features recover --bin sesame-recover
+          cargo build --release --locked --target ${{ matrix.target }} \
+            --no-default-features --features gui-mount --bin sesame-gui
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGING="closed-sesame-${VERSION}-${{ matrix.target }}"
+          mkdir -p "$STAGING"
+          cp target/${{ matrix.target }}/release/sesame* "$STAGING/" || true
+          cp README.md THIRD_PARTY.md LICENSE "$STAGING/" || true
+          cp vendor/winfsp/README.md "$STAGING/WINFSP-INSTALL.md" || true
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            powershell Compress-Archive -Path "$STAGING/*" -DestinationPath "${STAGING}.zip"
+            sha256sum "${STAGING}.zip" > SHA256SUMS.txt
+          else
+            tar czf "${STAGING}.tar.gz" "$STAGING"
+            sha256sum "${STAGING}.tar.gz" > SHA256SUMS.txt
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: closed-sesame-${{ matrix.target }}
+          path: |
+            closed-sesame-*
+            SHA256SUMS.txt

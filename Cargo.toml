@@ -1,0 +1,99 @@
+[package]
+name = "closed-sesame"
+version = "0.1.0"
+edition = "2024"
+description = "Because not everything needs to be prefixed with Open. Especially your privacy."
+license = "Apache-2.0"
+repository = "https://github.com/Silver-Aurora/closed-sesame"
+authors = ["Closed Sesame contributors"]
+
+[dependencies]
+aes-gcm = "0.10"
+argon2 = "0.5"
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+serde_bytes = "0.11"
+rand = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+rust-i18n = "3"
+sys-locale = "0.3"
+clap = { version = "4", features = ["derive"], optional = true }
+hex = "0.4"
+egui = { version = "0.34", optional = true }
+eframe = { version = "0.34", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "x11",
+    "wayland",
+], optional = true }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
+egui_extras = { version = "0.34", default-features = false, features = ["image"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+rpassword = { version = "7.5.4", optional = true }
+postcard = { version = "1.1.3", features = ["alloc", "use-std"], default-features = false }
+dirs = { version = "6", optional = true }
+notify = { version = "8", optional = true }
+tiny_http = { version = "0.12.0", optional = true }
+httpdate = { version = "1", optional = true }
+tray-icon = { version = "0.26.0", optional = true, default-features = false, features = ["ksni"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.17.0", optional = true }
+libc = { version = "0.2.186", optional = true }
+
+[target."cfg(windows)".dependencies]
+winfsp_wrs = { version = "0.4.1", optional = true }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[target."cfg(windows)".build-dependencies]
+winfsp_wrs_build = "0.4.1"
+embed-resource = "3"
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+
+[features]
+default = ["cli", "gui"]
+cli = ["dep:clap", "dep:rpassword"]
+gui = [
+    "dep:egui",
+    "dep:eframe",
+    "dep:egui_extras",
+    "dep:image",
+    "dep:rfd",
+    "dep:dirs",
+    "dep:serde_json",
+    "dep:notify",
+    "dep:tray-icon",
+]
+gui-mount = ["gui", "mount"]
+mount = ["dep:fuser", "dep:libc", "dep:winfsp_wrs", "dep:tiny_http", "dep:httpdate"]
+winfsp-debug = ["mount", "winfsp_wrs/debug"]
+recover = ["dep:clap", "dep:rpassword"]
+
+[[bin]]
+name = "sesame"
+path = "src/cli/main.rs"
+required-features = ["cli", "mount"]
+
+[[bin]]
+name = "sesame-gui"
+path = "src/bin/sesame-gui.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "sesame-recover"
+path = "src/recover/main.rs"
+required-features = ["recover"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

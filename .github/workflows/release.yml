@@ -1,0 +1,128 @@
+name: ClosedSesame Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to package (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfuse3-dev \
+            pkg-config \
+            libgtk-3-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-x11-dev
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build CLI
+        run: cargo build --release --locked --target ${{ matrix.target }} --no-default-features --features cli,mount --bin sesame
+
+      - name: Build recovery tool
+        run: cargo build --release --locked --target ${{ matrix.target }} --no-default-features --features recover --bin sesame-recover
+
+      - name: Build GUI
+        run: cargo build --release --locked --target ${{ matrix.target }} --no-default-features --features gui-mount --bin sesame-gui
+
+      - name: Package archive
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          staging="closed-sesame-${version}-${{ matrix.target }}"
+          mkdir -p "$staging"
+
+          if [ "${{ matrix.os }}" = "windows-2025" ]; then
+            cp "target/${{ matrix.target }}/release/sesame.exe" "$staging/"
+            cp "target/${{ matrix.target }}/release/sesame-recover.exe" "$staging/"
+            cp "target/${{ matrix.target }}/release/sesame-gui.exe" "$staging/"
+          else
+            cp "target/${{ matrix.target }}/release/sesame" "$staging/"
+            cp "target/${{ matrix.target }}/release/sesame-recover" "$staging/"
+            cp "target/${{ matrix.target }}/release/sesame-gui" "$staging/"
+          fi
+
+          cp README.md README.zh-CN.md README.ja.md LICENSE NOTICE THIRD_PARTY.md SECURITY.md \
+            CONTRIBUTING.md CHANGELOG.md "$staging/"
+          cp vendor/winfsp/README.md "$staging/WINFSP-INSTALL.md"
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            powershell -NoProfile -Command "Compress-Archive -Path '${staging}/*' -DestinationPath '${staging}.zip' -Force"
+            sha256sum "${staging}.zip" > "SHA256SUMS-${{ matrix.target }}.txt"
+          else
+            tar czf "${staging}.tar.gz" "$staging"
+            sha256sum "${staging}.tar.gz" > "SHA256SUMS-${{ matrix.target }}.txt"
+          fi
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: closed-sesame-${{ matrix.target }}
+          path: |
+            closed-sesame-*.zip
+            closed-sesame-*.tar.gz
+            SHA256SUMS-${{ matrix.target }}.txt
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: closed-sesame-*
+          merge-multiple: true
+
+      - name: Publish release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ClosedSesame ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
