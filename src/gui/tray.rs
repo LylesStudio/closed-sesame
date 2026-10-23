@@ -1,6 +1,9 @@
 //! System tray icon. Closing or minimizing the window hides it here so a
 //! mount can keep running. The process exits only from the tray menu.
 
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Mutex, Once, OnceLock};
+
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -18,12 +21,39 @@ enum Presence {
     Mounted,
 }
 
+/// Where the tray icon was when the user clicked it. Coordinates are physical pixels.
+/// Linux StatusNotifier leaves both empty; the panel then sits in the screen corner.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TrayAnchor {
+    pub(crate) icon: Option<TrayRect>,
+    pub(crate) cursor: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TrayRect {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TrayAction {
+    /// Open the main window. A double-click, or the menu's Show item.
     Show,
+    /// Left click: open or close the tray panel.
+    ToggleFlyout {
+        anchor: TrayAnchor,
+    },
     AddFiles,
     OpenMount,
     Lock,
     Quit,
+}
+
+enum PointerHit {
+    Click(TrayAnchor),
+    DoubleClick,
 }
 
 /// What the tray should show right now. Strings are already localized.
@@ -80,6 +110,9 @@ impl Tray {
         menu.append_items(&[&show, &separator, &quit]).ok()?;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu.clone()))
+            // Left click opens the tray panel. The menu stays on right click.
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(true)
             .with_tooltip("ClosedSesame")
             .with_icon(locked_icon.clone())
             .build()
@@ -178,39 +211,153 @@ impl Tray {
     }
 
     /// Drain tray clicks and menu selections. A menu choice wins over a click
-    /// in the same batch.
+    /// in the same batch. A double-click in the same batch opens the main
+    /// window instead of toggling the panel.
     pub(crate) fn poll() -> Option<TrayAction> {
-        let mut action = None;
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                }
-                | TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                } => action = Some(TrayAction::Show),
-                _ => {}
-            }
-        }
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            let id = event.id();
-            if id == SHOW_ID {
-                action = Some(TrayAction::Show);
-            } else if id == ADD_ID {
-                action = Some(TrayAction::AddFiles);
-            } else if id == MOUNT_ID {
-                action = Some(TrayAction::OpenMount);
-            } else if id == LOCK_ID {
-                action = Some(TrayAction::Lock);
-            } else if id == QUIT_ID {
-                action = Some(TrayAction::Quit);
-            }
-        }
-        action
+        let mut hits = Vec::new();
+        let mut menus = Vec::new();
+        drain_events(&mut hits, &mut menus);
+        let menu = menus.into_iter().reduce(|_, menu| menu);
+        prefer_menu(resolve_pointer(&hits), menu)
     }
+}
+
+struct Inbox {
+    icons: Mutex<Receiver<TrayIconEvent>>,
+    menus: Mutex<Receiver<MenuEvent>>,
+}
+
+static INBOX: OnceLock<Inbox> = OnceLock::new();
+static WAKE: Once = Once::new();
+
+/// Tray clicks arrive on a hidden window, not the egui one. Forward them into
+/// a channel and wake the event loop immediately, instead of waiting for the
+/// hidden main window's next throttled repaint.
+pub(crate) fn install_wake(ctx: egui::Context) {
+    WAKE.call_once(|| {
+        let (icon_tx, icon_rx) = mpsc::channel();
+        let (menu_tx, menu_rx) = mpsc::channel();
+        let _ = INBOX.set(Inbox {
+            icons: Mutex::new(icon_rx),
+            menus: Mutex::new(menu_rx),
+        });
+        let flyout = super::flyout::viewport_id();
+        let ctx_icon = ctx.clone();
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            let wake = matches!(
+                event,
+                TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
+            );
+            let _ = icon_tx.send(event);
+            if wake {
+                ctx_icon.request_repaint_of(flyout);
+                ctx_icon.request_repaint();
+            }
+        }));
+        let ctx_menu = ctx;
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            let _ = menu_tx.send(event);
+            ctx_menu.request_repaint_of(flyout);
+            ctx_menu.request_repaint();
+        }));
+    });
+}
+
+fn drain_events(hits: &mut Vec<PointerHit>, menus: &mut Vec<TrayAction>) {
+    let mut take_icon = |event: TrayIconEvent| match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            position,
+            rect,
+            ..
+        } => hits.push(PointerHit::Click(anchor_of(position, rect))),
+        TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        } => hits.push(PointerHit::DoubleClick),
+        _ => {}
+    };
+    let mut take_menu = |event: MenuEvent| {
+        if let Some(action) = menu_action(event.id()) {
+            menus.push(action);
+        }
+    };
+    if let Some(inbox) = INBOX.get() {
+        if let Ok(icons) = inbox.icons.lock() {
+            while let Ok(event) = icons.try_recv() {
+                take_icon(event);
+            }
+        }
+        if let Ok(menu) = inbox.menus.lock() {
+            while let Ok(event) = menu.try_recv() {
+                take_menu(event);
+            }
+        }
+        return;
+    }
+    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+        take_icon(event);
+    }
+    while let Ok(event) = MenuEvent::receiver().try_recv() {
+        take_menu(event);
+    }
+}
+
+fn anchor_of(position: tray_icon::dpi::PhysicalPosition<f64>, rect: tray_icon::Rect) -> TrayAnchor {
+    let icon = if rect.size.width > 0 && rect.size.height > 0 {
+        Some(TrayRect {
+            x: rect.position.x,
+            y: rect.position.y,
+            width: f64::from(rect.size.width),
+            height: f64::from(rect.size.height),
+        })
+    } else {
+        None
+    };
+    let cursor = if position.x.abs() > 1.0 || position.y.abs() > 1.0 {
+        Some((position.x, position.y))
+    } else {
+        None
+    };
+    TrayAnchor { icon, cursor }
+}
+
+fn menu_action(id: &tray_icon::menu::MenuId) -> Option<TrayAction> {
+    if id == SHOW_ID {
+        Some(TrayAction::Show)
+    } else if id == ADD_ID {
+        Some(TrayAction::AddFiles)
+    } else if id == MOUNT_ID {
+        Some(TrayAction::OpenMount)
+    } else if id == LOCK_ID {
+        Some(TrayAction::Lock)
+    } else if id == QUIT_ID {
+        Some(TrayAction::Quit)
+    } else {
+        None
+    }
+}
+
+/// A double-click swallows the preceding single click so the panel does not
+/// flash open before the main window.
+fn resolve_pointer(hits: &[PointerHit]) -> Option<TrayAction> {
+    if hits
+        .iter()
+        .any(|hit| matches!(hit, PointerHit::DoubleClick))
+    {
+        return Some(TrayAction::Show);
+    }
+    hits.iter().rev().find_map(|hit| match hit {
+        PointerHit::Click(anchor) => Some(TrayAction::ToggleFlyout {
+            anchor: anchor.clone(),
+        }),
+        PointerHit::DoubleClick => None,
+    })
+}
+
+fn prefer_menu(pointer: Option<TrayAction>, menu: Option<TrayAction>) -> Option<TrayAction> {
+    menu.or(pointer)
 }
 
 fn base_rgba() -> Option<(Vec<u8>, u32, u32)> {
@@ -292,6 +439,37 @@ fn fill_circle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn double_click_opens_the_window_instead_of_the_panel() {
+        let anchor = TrayAnchor {
+            icon: Some(TrayRect {
+                x: 10.0,
+                y: 20.0,
+                width: 16.0,
+                height: 16.0,
+            }),
+            cursor: Some((12.0, 22.0)),
+        };
+        let hits = [PointerHit::Click(anchor.clone()), PointerHit::DoubleClick];
+        assert_eq!(resolve_pointer(&hits), Some(TrayAction::Show));
+        assert_eq!(
+            resolve_pointer(&[PointerHit::Click(anchor.clone())]),
+            Some(TrayAction::ToggleFlyout { anchor })
+        );
+    }
+
+    #[test]
+    fn menu_choice_wins_over_a_click() {
+        let click = Some(TrayAction::ToggleFlyout {
+            anchor: TrayAnchor::default(),
+        });
+        assert_eq!(
+            prefer_menu(click, Some(TrayAction::Lock)),
+            Some(TrayAction::Lock)
+        );
+        assert_eq!(prefer_menu(None, None), None);
+    }
 
     #[test]
     fn tray_states_are_visually_distinct() {

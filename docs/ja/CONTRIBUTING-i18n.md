@@ -18,4 +18,4 @@
 
 ## フォント
 
-`assets/fonts/NotoSansSC-Regular.otf`（SIL OFL 1.1）を GUI に同梱しています。
+GUI の文字は **Source Sans 3**（欧文）と **源ノ角ゴシック / Noto Sans CJK**（簡体中国語と日本語の Regular、SIL OFL 1.1）です。ファイルは `assets/fonts/` にあります。

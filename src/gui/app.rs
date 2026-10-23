@@ -116,6 +116,9 @@ pub(crate) struct App {
     pub(crate) notifications_open: bool,
     pub(crate) notifications_read: usize,
     job: Option<job::ActiveJob>,
+    pub(crate) flyout: super::flyout::FlyoutState,
+    /// Next add lands here instead of [`Self::current_dir`] (the tray panel).
+    add_destination: Option<String>,
     tray: Option<super::tray::Tray>,
     tray_attempted: bool,
     /// Window was hidden after close/minimize. The process and any mount stay up.
@@ -198,6 +201,8 @@ impl Default for App {
             notifications_open: false,
             notifications_read: 0,
             job: None,
+            flyout: super::flyout::FlyoutState::default(),
+            add_destination: None,
             tray: None,
             tray_attempted: false,
             hidden_to_tray: false,
@@ -388,11 +393,19 @@ impl App {
         self.session.is_some()
     }
 
-    fn touch(&mut self) {
+    pub(crate) fn has_job(&self) -> bool {
+        self.job.is_some()
+    }
+
+    pub(crate) fn current_job(&self) -> Option<&job::ActiveJob> {
+        self.job.as_ref()
+    }
+
+    pub(crate) fn touch(&mut self) {
         self.auto_lock.touch();
     }
 
-    fn set_status(&mut self, status: impl Into<String>) {
+    pub(crate) fn set_status(&mut self, status: impl Into<String>) {
         self.status.zeroize();
         let text = status.into();
         let kind = if text.starts_with('✓') {
@@ -470,6 +483,10 @@ impl App {
             self.current_dir = self.browser.nearest_existing_dir(&self.current_dir);
             self.clear_selection();
         }
+        if !self.browser.has_dir(&self.flyout.dir) {
+            self.flyout.dir = self.browser.nearest_existing_dir(&self.flyout.dir);
+            self.flyout.selected = None;
+        }
         // Drop selections that vanished.
         let live: BTreeSet<&str> = self
             .entries
@@ -478,6 +495,14 @@ impl App {
             .collect();
         self.selected_paths
             .retain(|path| live.contains(path.as_str()));
+        if self
+            .flyout
+            .selected
+            .as_ref()
+            .is_some_and(|path| !live.contains(path.as_str()))
+        {
+            self.flyout.selected = None;
+        }
         if self
             .selection_anchor
             .as_ref()
@@ -601,11 +626,12 @@ impl App {
         } else {
             format!("{name}.sesame")
         };
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter(&ts!("gui.sesame_filter"), &["sesame"])
-            .set_file_name(file_name)
-            .save_file()
-        else {
+        let Some(path) = self.with_native_modal(|| {
+            rfd::FileDialog::new()
+                .add_filter(&ts!("gui.sesame_filter"), &["sesame"])
+                .set_file_name(&file_name)
+                .save_file()
+        }) else {
             return;
         };
         match actions::create(&path, data_size, &self.password, self.no_password) {
@@ -623,7 +649,10 @@ impl App {
         {
             session.create_symlinks = self.create_symlinks && self.mounted.is_some();
         }
-        let current_dir = self.current_dir.clone();
+        let current_dir = self
+            .add_destination
+            .take()
+            .unwrap_or_else(|| self.current_dir.clone());
         let container = session.path().to_path_buf();
         let credentials = session.credentials().clone();
         let create_symlinks = session.create_symlinks;
@@ -752,7 +781,8 @@ impl App {
         let _ = mounted.refresh_vault(session.path(), session.credentials());
     }
 
-    fn lock(&mut self) {
+    pub(crate) fn lock(&mut self) {
+        let reopen = self.path_input.clone();
         let unsynced = self.flush_cache_on_lock();
         if let Some(cache) = self.cache.take() {
             if unsynced.is_empty() {
@@ -788,6 +818,8 @@ impl App {
         self.show_settings = false;
         self.dialog = None;
         self.notifications_open = false;
+        self.add_destination = None;
+        self.flyout.on_locked(reopen);
         if !unsynced.is_empty() {
             self.set_status(ts!(
                 "gui.status.cache_unsynced_kept",
@@ -1176,7 +1208,7 @@ impl App {
         }
     }
 
-    fn request_add_files(&mut self, paths: Vec<PathBuf>) {
+    pub(crate) fn request_add_files(&mut self, paths: Vec<PathBuf>) {
         #[cfg(feature = "mount")]
         {
             if self.create_symlinks
@@ -1259,7 +1291,7 @@ impl App {
         if paths.is_empty() || self.job.is_some() {
             return;
         }
-        let Some(output) = rfd::FileDialog::new().pick_folder() else {
+        let Some(output) = self.with_native_modal(|| rfd::FileDialog::new().pick_folder()) else {
             return;
         };
         let Some(session) = self.session.as_ref() else {
@@ -1546,7 +1578,7 @@ impl App {
         if self.job.is_some() {
             return;
         }
-        let Some(output) = rfd::FileDialog::new().pick_folder() else {
+        let Some(output) = self.with_native_modal(|| rfd::FileDialog::new().pick_folder()) else {
             return;
         };
         let Some(session) = self.session.as_ref() else {
@@ -1680,6 +1712,7 @@ impl App {
                     self.settings.set_skip_symlink_info(true);
                 }
                 if paths.is_empty() {
+                    self.add_destination = None;
                     #[cfg(feature = "mount")]
                     {
                         self.create_symlinks = true;
@@ -1724,7 +1757,7 @@ impl App {
                 }
                 ConflictResolution::Discard => self.discard_cache_entry(&container_path),
             },
-            DialogOutcome::Cancelled => {}
+            DialogOutcome::Cancelled => self.add_destination = None,
         }
     }
 
@@ -1732,10 +1765,11 @@ impl App {
         self.touch();
         match event {
             Event::BrowseVault => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter(&ts!("gui.sesame_filter"), &["sesame"])
-                    .pick_file()
-                {
+                if let Some(path) = self.with_native_modal(|| {
+                    rfd::FileDialog::new()
+                        .add_filter(&ts!("gui.sesame_filter"), &["sesame"])
+                        .pick_file()
+                }) {
                     self.path_input = path.to_string_lossy().into_owned();
                 }
             }
@@ -1761,12 +1795,14 @@ impl App {
                 }
             }
             Event::AddFiles => {
-                if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                if let Some(paths) = self.with_native_modal(|| rfd::FileDialog::new().pick_files())
+                {
                     self.request_add_files(paths);
                 }
             }
             Event::AddFolder => {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                if let Some(path) = self.with_native_modal(|| rfd::FileDialog::new().pick_folder())
+                {
                     self.request_add_files(vec![path]);
                 }
             }
@@ -1959,6 +1995,142 @@ impl App {
         }
     }
 
+    pub(crate) fn stage_add(&mut self, dir: String) {
+        self.add_destination = Some(dir);
+    }
+
+    pub(crate) fn extract_one(&mut self, path: &str) {
+        if self.job.is_some() {
+            return;
+        }
+        self.begin_extract(vec![path.to_owned()]);
+    }
+
+    pub(crate) fn unlock_from_flyout(&mut self) {
+        let path = self.flyout.vault_path.trim().to_owned();
+        if path.is_empty() {
+            self.set_status(ts!(
+                "gui.status.error",
+                error = ts!("gui.tray.flyout.no_vault")
+            ));
+            return;
+        }
+        self.path_input = path;
+        self.no_password = self.flyout.no_password;
+        self.password.zeroize();
+        self.password = std::mem::take(&mut self.flyout.password);
+        self.open();
+        if self.session.is_none() {
+            self.flyout.password = std::mem::take(&mut self.password);
+        }
+    }
+
+    pub(crate) fn dismiss_flyout(&mut self, ctx: &egui::Context) {
+        if !self.flyout.open {
+            return;
+        }
+        self.flyout.shut();
+        if !self.hidden_to_tray {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+    }
+
+    fn open_flyout(&mut self, anchor: super::tray::TrayAnchor) {
+        self.flyout.open_with(anchor);
+        if self.is_unlocked() && self.flyout.dir.is_empty() {
+            self.flyout.dir = self.current_dir.clone();
+        }
+        if !self.is_unlocked() && self.flyout.vault_path.is_empty() {
+            if !self.path_input.is_empty() {
+                self.flyout.vault_path = self.path_input.clone();
+            } else if let Some(recent) = self.recent.entries.first() {
+                self.flyout.vault_path = recent.path.display().to_string();
+            }
+        }
+        if !self.is_unlocked() {
+            self.flyout.focus_password = true;
+        }
+        self.touch();
+    }
+
+    pub(crate) fn with_native_modal<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        let _guard = self.flyout.begin_modal();
+        f()
+    }
+
+    fn present_flyout(&mut self, ctx: &egui::Context) {
+        // Keep the native window alive after the first frame so a click only
+        // moves and paints it. Creating the GL surface on the click is the
+        // cold start.
+        if self.tray.is_none() || self.exit_requested {
+            return;
+        }
+        let open = self.flyout.open;
+        let parent_ppp = ctx.input(|input| input.viewport().native_pixels_per_point.unwrap_or(1.0));
+        let ppp = self.flyout.scale().unwrap_or(parent_ppp);
+        let screen = ctx.input(|input| input.viewport().monitor_size);
+        let size = super::flyout::window_size();
+        // Off-screen, but still visible on Windows, so a tray click can wake
+        // this window without the hidden-root repaint throttle.
+        let origin = if open {
+            let card = super::flyout::place_flyout(
+                &self.flyout.anchor,
+                ppp,
+                screen,
+                egui::vec2(super::flyout::CARD_WIDTH, super::flyout::CARD_HEIGHT),
+            );
+            super::flyout::window_origin(card)
+        } else {
+            egui::pos2(-10000.0, -10000.0)
+        };
+        let builder = egui::ViewportBuilder::default()
+            .with_title(super::flyout::WINDOW_TITLE)
+            .with_inner_size(size)
+            .with_min_inner_size(size)
+            .with_max_inner_size(size)
+            .with_position(origin)
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_drag_and_drop(true)
+            .with_mouse_passthrough(!open)
+            .with_close_button(false)
+            .with_minimize_button(false)
+            .with_maximize_button(false)
+            // Never toggle this: egui recreates the window when it changes,
+            // which is the cold start we are avoiding.
+            .with_active(false)
+            .with_visible(open || cfg!(windows))
+            .with_window_type(egui::X11WindowType::PopupMenu)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+            .with_titlebar_buttons_shown(false)
+            .with_has_shadow(false);
+        #[cfg(not(windows))]
+        let builder = builder.with_transparent(true);
+        ctx.show_viewport_immediate(super::flyout::viewport_id(), builder, |ui, _class| {
+            super::flyout::round_window_frame();
+            if !self.flyout.open {
+                return;
+            }
+            let child_ppp =
+                ui.input(|input| input.viewport().native_pixels_per_point.unwrap_or(ppp));
+            if self.flyout.consume_window_focus() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            super::flyout::show(self, ui);
+            if self.flyout.open
+                && let Some(outcome) = super::dialog::show(self, ui)
+            {
+                self.handle_dialog_outcome(outcome);
+            }
+            if self.flyout.open && (child_ppp - ppp).abs() > 0.05 {
+                self.flyout.note_scale(child_ppp);
+            }
+        });
+    }
+
     fn service_tray(&mut self, ctx: &egui::Context) {
         if !self.tray_attempted {
             self.tray_attempted = true;
@@ -1967,9 +2139,20 @@ impl App {
         if self.tray.is_none() {
             return;
         }
+        super::tray::install_wake(ctx.clone());
         self.sync_tray();
         match super::tray::Tray::poll() {
-            Some(super::tray::TrayAction::Show) => self.reveal_from_tray(ctx),
+            Some(super::tray::TrayAction::Show) => {
+                self.dismiss_flyout(ctx);
+                self.reveal_from_tray(ctx);
+            }
+            Some(super::tray::TrayAction::ToggleFlyout { anchor }) => {
+                if self.flyout.open {
+                    self.dismiss_flyout(ctx);
+                } else if !self.flyout.swallows_tray_reopen() {
+                    self.open_flyout(anchor);
+                }
+            }
             Some(super::tray::TrayAction::AddFiles) => self.add_from_tray(ctx),
             Some(super::tray::TrayAction::OpenMount) => self.open_mount_from_tray(),
             Some(super::tray::TrayAction::Lock) => {
@@ -1977,7 +2160,10 @@ impl App {
                     self.lock();
                 }
             }
-            Some(super::tray::TrayAction::Quit) => self.quit_from_tray(ctx),
+            Some(super::tray::TrayAction::Quit) => {
+                self.dismiss_flyout(ctx);
+                self.quit_from_tray(ctx);
+            }
             None => self.hide_to_tray_if_dismissed(ctx),
         }
         if !self.exit_requested {
@@ -2017,7 +2203,7 @@ impl App {
         if !self.is_unlocked() || self.job.is_some() {
             return;
         }
-        let Some(paths) = rfd::FileDialog::new().pick_files() else {
+        let Some(paths) = self.with_native_modal(|| rfd::FileDialog::new().pick_files()) else {
             return;
         };
         let waiting_for_dialog = self.dialog.is_some();
@@ -2027,7 +2213,7 @@ impl App {
         }
     }
 
-    fn open_mount_from_tray(&mut self) {
+    pub(crate) fn open_mount_from_tray(&mut self) {
         #[cfg(feature = "mount")]
         if let Some(mounted) = self.mounted.as_ref() {
             let point = mounted.mount_point().to_path_buf();
@@ -2065,14 +2251,18 @@ impl App {
         self.suppress_minimize = false;
     }
 
-    fn reveal_from_tray(&mut self, ctx: &egui::Context) {
+    pub(crate) fn reveal_from_tray(&mut self, ctx: &egui::Context) {
         self.hidden_to_tray = false;
         self.suppress_minimize = true;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // The tray panel is a second viewport. Commands must name the root
+        // window; otherwise Visible/Focus land on the panel and the main
+        // window stays hidden.
+        let root = egui::ViewportId::ROOT;
+        ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Focus);
         self.touch();
-        ctx.request_repaint();
+        ctx.request_repaint_of(root);
     }
 
     fn quit_from_tray(&mut self, ctx: &egui::Context) {
@@ -2092,9 +2282,10 @@ impl eframe::App for App {
             self.poll_job();
             ctx.request_repaint_after(Duration::from_millis(80));
         }
-        // Hiding the window is intentional. Keep the idle timer from locking
-        // (and unmounting) until the window is visible again.
-        if self.hidden_to_tray {
+        // A hidden main window pauses auto-lock. The tray panel is a visible
+        // surface, so idle time counts while it is open.
+        let surface_open = !self.hidden_to_tray || self.flyout.open;
+        if !surface_open {
             self.touch();
         } else if self.is_unlocked() && self.job.is_none() && self.auto_lock.expired() {
             self.set_status(ts!("gui.status.auto_locked"));
@@ -2104,8 +2295,15 @@ impl eframe::App for App {
         if self.is_unlocked() {
             self.poll_cache(ctx);
         }
+        self.present_flyout(ctx);
         if self.tray.is_some() && !self.exit_requested {
-            let wait = if self.hidden_to_tray { 200 } else { 400 };
+            let wait = if self.flyout.open {
+                80
+            } else if self.hidden_to_tray {
+                200
+            } else {
+                400
+            };
             ctx.request_repaint_after(Duration::from_millis(wait));
         }
     }
@@ -2147,7 +2345,9 @@ impl eframe::App for App {
                 }
                 self.handle(event);
             }
-            if let Some(outcome) = super::dialog::show(self, ui) {
+            if !self.flyout.open
+                && let Some(outcome) = super::dialog::show(self, ui)
+            {
                 self.handle_dialog_outcome(outcome);
             }
         }
@@ -2155,6 +2355,7 @@ impl eframe::App for App {
             job::overlay(ui, job, self.palette);
         }
         if locale_changed {
+            super::fonts::install_fonts(ui.ctx(), self.locale);
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Title(ts!("gui.window_title")));
         }

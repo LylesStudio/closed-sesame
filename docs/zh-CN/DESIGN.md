@@ -28,7 +28,7 @@
 - 最近容器（`recent.rs`，配置目录 JSON）
 - 自动锁定（默认 10 分钟，可配置）
 - 防截屏（`anti_capture.rs`，Settings 开关，解锁后生效）：`ViewportCommand::ContentProtected` → winit `set_content_protected`（Windows/macOS）；Linux 同路径调用（当前为 no-op），说明随 X11/Wayland/KDE 环境变化
-- CJK 字体：内嵌 Noto Sans SC 子集（`assets/fonts/`）
+- 字体：内嵌 Source Sans 3（英文）与思源黑体 / Noto Sans CJK（简体与日文 Regular，`assets/fonts/`）
 
 ## 提取冲突交互
 

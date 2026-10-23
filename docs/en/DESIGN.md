@@ -28,7 +28,7 @@ Visual theme: obsidian/dark-gold dark mode and pearl/slate light mode (`theme.rs
 - Recent vaults (`recent.rs`, JSON in config dir)
 - Auto-lock (default 10 minutes, configurable)
 - Anti-screenshot (`anti_capture.rs`, Settings toggle, active when unlocked): `ViewportCommand::ContentProtected` → winit `set_content_protected` on Windows/macOS; Linux sends the same command (currently no-op) with environment-specific capability notes (X11 / Wayland / KDE)
-- CJK rendering via embedded Noto Sans SC subset (`assets/fonts/`)
+- Text uses embedded Source Sans 3 for Latin and Noto Sans CJK (SC and JP Regular) for Chinese and Japanese (`assets/fonts/`)
 
 ## Extract conflict UX
 

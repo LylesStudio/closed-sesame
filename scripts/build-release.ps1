@@ -8,6 +8,8 @@
 # Usage (from the repo root or anywhere):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1
 #   scripts\build-release.bat
+#
+# macOS and Linux: ./scripts/build-release.sh
 
 param(
     [string]$Version = ""

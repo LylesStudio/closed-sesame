@@ -19,7 +19,7 @@
 - Ctrl/Shift 複数選択、一括削除/抽出（リネーム・外部で開くは単一選択のみ）
 - マウント/アンマウント（`gui-mount`）、ファイル/フォルダーシンボリックリンク
 - 防截屏: Windows/macOS は winit `set_content_protected`、Linux はベストエフォート（環境別説明）
-- Noto Sans SC 子セットによる CJK 表示
+- 文字は同梱の Source Sans 3（欧文）と源ノ角ゴシック / Noto Sans CJK（簡体中国語と日本語の Regular）
 
 ## 境界
 

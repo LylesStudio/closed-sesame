@@ -17,8 +17,16 @@ limitations under the License.
 
 This product bundles the following third-party assets:
 
-- Noto Sans SC (assets/fonts/NotoSansSC-Regular.otf), licensed under the
+- Source Sans 3 (assets/fonts/SourceSans3-Regular.ttf), licensed under the
   SIL Open Font License 1.1 (https://scripts.sil.org/OFL).
+  Copyright 2010-2023 Adobe, with Reserved Font Name "Source".
+- Source Han Sans / Noto Sans CJK (assets/fonts/NotoSansCJKsc-Regular.otf and
+  assets/fonts/NotoSansCJKjp-Regular.otf), licensed under the SIL Open Font
+  License 1.1 (https://scripts.sil.org/OFL).
+  Copyright 2014-2021 Adobe, with Reserved Font Name "Source".
+
+The complete SIL Open Font License 1.1 text is included at
+assets/fonts/OFL-1.1.txt.
 
 All icons and the application logo are original artwork created for this
 project (assets/icons, assets/logo-*.svg).

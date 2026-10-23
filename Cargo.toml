@@ -48,7 +48,11 @@ libc = { version = "0.2.186", optional = true }
 
 [target."cfg(windows)".dependencies]
 winfsp_wrs = { version = "0.4.1", optional = true }
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [target."cfg(windows)".build-dependencies]
 winfsp_wrs_build = "0.4.1"

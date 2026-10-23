@@ -1,6 +1,6 @@
-Noto Sans SC subset notice
+Embedded font notice
 
-The bundled font at assets/fonts/NotoSansSC-Regular.otf is a subset of Noto Sans SC.
+The GUI bundles Source Sans 3 and Noto Sans CJK (Simplified Chinese and Japanese Regular).
 See THIRD_PARTY.md and NOTICE for the applicable attribution.
 
 Copyright (c) ,  (),

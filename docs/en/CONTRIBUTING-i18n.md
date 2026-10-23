@@ -37,4 +37,4 @@ Markdown is maintained per language. Each doc starts with language links. When c
 
 ## Fonts
 
-GUI CJK text uses **Noto Sans SC** (subset OTF, SIL Open Font License 1.1) at `assets/fonts/NotoSansSC-Regular.otf`. Document license changes in `THIRD_PARTY.md`.
+GUI text uses **Source Sans 3** for Latin and **Noto Sans CJK** (SC and JP Regular) for Chinese and Japanese, all SIL OFL 1.1, under `assets/fonts/`. Document license changes in `THIRD_PARTY.md`.

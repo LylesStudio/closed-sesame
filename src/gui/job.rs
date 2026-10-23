@@ -106,6 +106,10 @@ impl ActiveJob {
     pub(crate) fn poll(&self) -> Option<Result<JobOutput, SesameError>> {
         self.rx.try_recv().ok()
     }
+
+    pub(crate) fn snapshot(&self) -> (u64, u64, String) {
+        self.progress.get()
+    }
 }
 
 pub(crate) fn overlay(ui: &mut Ui, job: &ActiveJob, p: Palette) {

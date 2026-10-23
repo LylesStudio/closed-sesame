@@ -7,6 +7,7 @@ mod auto_lock;
 mod browser;
 mod cache;
 mod dialog;
+mod flyout;
 mod fonts;
 mod icons;
 mod job;
@@ -51,6 +52,13 @@ pub fn run() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([layout::DESIGN_WIDTH, layout::DESIGN_HEIGHT])
         .with_min_inner_size([layout::MIN_WINDOW_WIDTH, layout::MIN_WINDOW_HEIGHT]);
+    // The tray panel paints transparent corners. The GL config is chosen from
+    // the root viewport, so the root asks for an alpha buffer too. Its own
+    // pixels stay opaque.
+    #[cfg(not(windows))]
+    {
+        viewport = viewport.with_transparent(true);
+    }
 
     if let Some(icon) = load_window_icon() {
         viewport = viewport.with_icon(icon);
@@ -67,7 +75,12 @@ pub fn run() -> eframe::Result<()> {
         },
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            fonts::install_fonts(&cc.egui_ctx);
+            let font_locale = gui_settings
+                .locale()
+                .or_else(crate::i18n::Locale::from_env)
+                .or_else(crate::i18n::Locale::from_system)
+                .unwrap_or(crate::i18n::Locale::En);
+            fonts::install_fonts(&cc.egui_ctx, font_locale);
             Ok(Box::new(app::App::new(gui_settings)))
         }),
     )

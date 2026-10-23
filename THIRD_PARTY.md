@@ -47,14 +47,25 @@ The GUI is built on [egui](https://crates.io/crates/egui) /
 [eframe](https://crates.io/crates/eframe) (MIT OR Apache-2.0) and
 [rfd](https://crates.io/crates/rfd) (MIT) for native file dialogs.
 
-## Noto Sans SC (GUI embedded font)
+## GUI embedded fonts
 
-The GUI embeds a subset of [Noto Sans SC](https://github.com/notofonts/noto-cjk) at
-`assets/fonts/NotoSansSC-Regular.otf` for CJK text rendering (Simplified Chinese and common Japanese glyphs).
+Latin text uses [Source Sans 3](https://github.com/adobe-fonts/source-sans) Regular
+(`assets/fonts/SourceSans3-Regular.ttf`).
+CJK text uses [Source Han Sans](https://github.com/adobe-fonts/source-han-sans)
+(Google name: Noto Sans CJK), Regular weight:
 
-Noto fonts are licensed under the **[SIL Open Font License 1.1](https://scripts.sil.org/OFL)**.
+- `assets/fonts/NotoSansCJKsc-Regular.otf` — Simplified Chinese
+- `assets/fonts/NotoSansCJKjp-Regular.otf` — Japanese
+
+Source Sans 3 is tried first, so it draws English. It has no Han or kana, so those
+fall through to the CJK face. The Japanese face is preferred while the UI language
+is Japanese; otherwise the Simplified Chinese face is preferred.
+
+All three fonts are licensed under the **[SIL Open Font License 1.1](https://scripts.sil.org/OFL)**.
 The complete license text is included at [`assets/fonts/OFL-1.1.txt`](assets/fonts/OFL-1.1.txt).
-The font file is bundled in release binaries that include the `gui` feature.
+Source Sans 3: Copyright 2010-2023 Adobe, with Reserved Font Name "Source".
+Source Han Sans / Noto Sans CJK: Copyright 2014-2021 Adobe, with Reserved Font Name "Source".
+The font files are bundled in release binaries that include the `gui` feature.
 
 ## Icons and logo
 

@@ -4,16 +4,38 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+### 2026-10-23 — Tray flyout, embedded fonts, release script
+
+#### Added
+
+- Windows tray flyout panel with per-item actions. It dismisses as soon as it
+  loses focus and does not reopen on the tray click that caused the blur.
+- `scripts/build-release.sh` for one-click macOS and Linux release builds,
+  building the same feature sets as the Windows script and CI.
+
+#### Changed
+
+- GUI fonts: Source Sans 3 for Latin, plus Source Han Sans / Noto Sans CJK
+  (Simplified Chinese and Japanese) for Han and kana. These replace the
+  Noto Sans SC subset, so Japanese UI text is no longer drawn from a
+  Simplified Chinese face.
+- Tray and mount strings localized in English, Japanese, and Simplified Chinese.
+
+#### Fixed
+
+- `NOTICE` now attributes the fonts that release binaries actually bundle.
+- Removed the promo-video README placeholder links, which pointed at release
+  assets that were never published.
+
 ### 2026-10-14 — Public release hardening
 
 #### Added
 
 - Public-release security policy, contributor guide, code of conduct, and the
-  complete SIL Open Font License 1.1 text for the bundled Noto Sans SC subset.
+  complete SIL Open Font License 1.1 text for the bundled fonts.
 - Portable locale parity check at `scripts/check_locales.py`.
 - GitHub Actions quality and tag-driven release workflows under
   `.github/workflows/`.
-- Release README links for the English and Chinese promo videos.
 
 #### Fixed
 

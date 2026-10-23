@@ -37,4 +37,4 @@ Markdown 按语言分别维护；每篇文档顶部有语言切换链接。行�
 
 ## 字体
 
-GUI 中日韩文字使用 **Noto Sans SC** 子集（`assets/fonts/NotoSansSC-Regular.otf`，SIL OFL 1.1）。许可变更请更新 `THIRD_PARTY.md`。
+GUI 文字使用 **Source Sans 3**（英文）和 **思源黑体 / Noto Sans CJK**（简体与日文 Regular，SIL OFL 1.1），文件在 `assets/fonts/`。许可变更请更新 `THIRD_PARTY.md`。
