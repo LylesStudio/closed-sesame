@@ -4,7 +4,9 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
-### 2026-10-23 — Tray flyout, embedded fonts, release script
+## 0.1.1 — 2026-10-23
+
+### Tray flyout, embedded fonts, release script
 
 #### Added
 

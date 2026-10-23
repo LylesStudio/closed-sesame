@@ -1,6 +1,6 @@
 [package]
 name = "closed-sesame"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Because not everything needs to be prefixed with Open. Especially your privacy."
 license = "Apache-2.0"
