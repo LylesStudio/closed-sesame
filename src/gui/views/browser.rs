@@ -1,18 +1,22 @@
 //! Unlocked vault browser: sidebar (vault card, actions, mount) + file list
-//! with search, sortable columns, inline rename, keyboard navigation and a
-//! drag-and-drop overlay.
+//! with search, sortable columns, inline rename, keyboard navigation,
+//! in-vault drag-to-move and an overlay for files dropped in from outside.
 
 use super::Event;
 use crate::app::fmt_size;
 use crate::gui::app::{App, FocusTarget, SortKey};
 use crate::gui::browser::BrowserNode;
+use crate::gui::dnd::{self, MovePayload};
 use crate::gui::icons::{Icon, paint_icon};
 use crate::gui::layout::fill_background;
+use crate::gui::sort;
 use crate::gui::theme::{Palette, ease_out, lerp_color, with_alpha};
+#[cfg(feature = "mount")]
+use crate::gui::widgets::input_field_sized;
 use crate::gui::widgets::{
     badge, capacity_bar, chip_button, clickable, flat_icon_button, ghost_button, hairline,
-    input_field_sized, menu_item, menu_item_colored, nav_button, paint_chevron, paint_sort_arrow,
-    section_label, show_toast, status_dot, timestamp_label, vault_display_name,
+    menu_item, menu_item_colored, nav_button, paint_chevron, paint_sort_arrow, section_label,
+    show_toast, status_dot, timestamp_label, vault_display_name,
 };
 use egui::{
     Align, Color32, FontId, Frame, Layout, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind,
@@ -120,6 +124,20 @@ fn sidebar(app: &mut App, ui: &mut Ui, events: &mut Vec<Event>) {
                     section_label(ui, p, crate::ts!("gui.browser.section_actions"));
                     ui.add_space(2.0);
                     let width = ui.available_width();
+                    if nav_button(
+                        ui,
+                        p,
+                        Some(Icon::File),
+                        crate::ts!("gui.browser.new_text"),
+                        width,
+                        false,
+                    )
+                    .on_hover_text(crate::ts!("gui.browser.new_text_hint"))
+                    .clicked()
+                        && !app.has_job()
+                    {
+                        events.push(Event::NewText);
+                    }
                     if nav_button(
                         ui,
                         p,
@@ -606,6 +624,8 @@ fn breadcrumbs(app: &App, ui: &mut Ui, events: &mut Vec<Event>) {
         Some(Icon::FolderLock),
         &root_label,
         app.current_dir.is_empty(),
+        "",
+        events,
     ) {
         events.push(Event::EnterDirectory(String::new()));
     }
@@ -622,13 +642,21 @@ fn breadcrumbs(app: &App, ui: &mut Ui, events: &mut Vec<Event>) {
         }
         accumulated.push_str(segment);
         let is_last = index + 1 == segments.len();
-        if crumb(ui, p, None, segment, is_last) {
+        if crumb(ui, p, None, segment, is_last, &accumulated, events) {
             events.push(Event::EnterDirectory(accumulated.clone()));
         }
     }
 }
 
-fn crumb(ui: &mut Ui, p: Palette, icon: Option<Icon>, label: &str, current: bool) -> bool {
+fn crumb(
+    ui: &mut Ui,
+    p: Palette,
+    icon: Option<Icon>,
+    label: &str,
+    current: bool,
+    dir: &str,
+    events: &mut Vec<Event>,
+) -> bool {
     let font = FontId::proportional(if current { 15.0 } else { 13.0 });
     let color = if current { p.text } else { p.muted };
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font, color);
@@ -651,6 +679,16 @@ fn crumb(ui: &mut Ui, p: Palette, icon: Option<Icon>, label: &str, current: bool
     if hover > 0.0 {
         ui.painter()
             .rect_filled(rect, 7.0, with_alpha(p.surface_elevated, hover));
+    }
+    if dnd::drop_hot(&response, dir) {
+        ui.painter()
+            .rect_stroke(rect, 7.0, Stroke::new(1.5, p.accent), StrokeKind::Inside);
+    }
+    if let Some(paths) = dnd::take_drop(&response, dir) {
+        events.push(Event::MoveTo {
+            paths,
+            destination: dir.to_owned(),
+        });
     }
     let color = lerp_color(color, p.text, hover);
     let mut x = rect.left() + 7.0;
@@ -695,8 +733,22 @@ fn toolbar(app: &mut App, ui: &mut Ui, events: &mut Vec<Event>) {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(RichText::new(summary).size(12.0).color(p.muted));
         ui.add_space(6.0);
-        if app.selected_paths.is_empty() {
-            if chip_button(
+        let text_tone = if app.has_job() { p.faint } else { p.accent };
+        if chip_button(
+            ui,
+            p,
+            Some(Icon::File),
+            crate::ts!("gui.browser.new_text"),
+            text_tone,
+        )
+        .on_hover_text(crate::ts!("gui.browser.new_text_hint"))
+        .clicked()
+            && !app.has_job()
+        {
+            events.push(Event::NewText);
+        }
+        if app.selected_paths.is_empty()
+            && chip_button(
                 ui,
                 p,
                 Some(Icon::Plus),
@@ -704,18 +756,23 @@ fn toolbar(app: &mut App, ui: &mut Ui, events: &mut Vec<Event>) {
                 p.accent,
             )
             .clicked()
-            {
-                app.mkdir_open = !app.mkdir_open;
-                if app.mkdir_open {
-                    app.focus_request = Some(FocusTarget::Mkdir);
-                } else {
-                    app.mkdir_input.clear();
-                }
+        {
+            app.mkdir_open = !app.mkdir_open;
+            if app.mkdir_open {
+                app.focus_request = Some(FocusTarget::Mkdir);
+            } else {
+                app.mkdir_input.clear();
             }
-        } else {
-            selection_actions(app, ui, events);
         }
     });
+    if !app.selected_paths.is_empty() {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.set_height(30.0);
+            ui.spacing_mut().item_spacing.x = 6.0;
+            selection_actions(app, ui, events);
+        });
+    }
     if app.mkdir_open && app.selected_paths.is_empty() {
         ui.add_space(6.0);
         mkdir_row(app, ui, events);
@@ -920,73 +977,8 @@ fn visible_children(app: &App, node: &BrowserNode) -> Vec<BrowserNode> {
     } else {
         app.browser.search(&query).into_iter().cloned().collect()
     };
-    children.sort_by(|a, b| {
-        use std::cmp::Ordering;
-        match (a.is_dir, b.is_dir) {
-            (true, false) => return Ordering::Less,
-            (false, true) => return Ordering::Greater,
-            _ => {}
-        }
-        let ordering = match app.sort.key {
-            SortKey::Name => natural_cmp(&a.name, &b.name),
-            SortKey::Size => a
-                .total_size()
-                .cmp(&b.total_size())
-                .then_with(|| natural_cmp(&a.name, &b.name)),
-            SortKey::Modified => a
-                .modified_at
-                .cmp(&b.modified_at)
-                .then_with(|| natural_cmp(&a.name, &b.name)),
-        };
-        if app.sort.ascending {
-            ordering
-        } else {
-            ordering.reverse()
-        }
-    });
+    children.sort_by(|a, b| sort::cmp_nodes(a, b, app.sort));
     children
-}
-
-/// Case-insensitive comparison that orders embedded numbers numerically
-/// (`file2` < `file10`).
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let mut ai = a.chars().peekable();
-    let mut bi = b.chars().peekable();
-    loop {
-        match (ai.peek().copied(), bi.peek().copied()) {
-            (None, None) => return std::cmp::Ordering::Equal,
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
-            (Some(ca), Some(cb)) if ca.is_ascii_digit() && cb.is_ascii_digit() => {
-                let mut na = 0u128;
-                while let Some(c) = ai.peek().copied().filter(char::is_ascii_digit) {
-                    na = na
-                        .saturating_mul(10)
-                        .saturating_add(c as u128 - '0' as u128);
-                    ai.next();
-                }
-                let mut nb = 0u128;
-                while let Some(c) = bi.peek().copied().filter(char::is_ascii_digit) {
-                    nb = nb
-                        .saturating_mul(10)
-                        .saturating_add(c as u128 - '0' as u128);
-                    bi.next();
-                }
-                if na != nb {
-                    return na.cmp(&nb);
-                }
-            }
-            (Some(ca), Some(cb)) => {
-                let la = ca.to_lowercase().next().unwrap_or(ca);
-                let lb = cb.to_lowercase().next().unwrap_or(cb);
-                if la != lb {
-                    return la.cmp(&lb);
-                }
-                ai.next();
-                bi.next();
-            }
-        }
-    }
 }
 
 /// Tint for a file by extension category.
@@ -1031,11 +1023,17 @@ fn file_list(app: &mut App, ui: &mut Ui, events: &mut Vec<Event>) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if visible.is_empty() {
-                        empty_state(app, ui, node.children.is_empty());
+                        empty_state(app, ui, node.children.is_empty(), events);
                         return;
                     }
+                    let mut over_row = false;
                     for child in &visible {
-                        file_row(app, ui, child, &ordered, show_modified, events);
+                        if file_row(app, ui, child, &ordered, show_modified, events) {
+                            over_row = true;
+                        }
+                    }
+                    if !over_row && !hovering_files {
+                        accept_folder_drop(ui, ui.max_rect(), &app.current_dir, events);
                     }
                     ui.add_space(6.0);
                 });
@@ -1043,6 +1041,11 @@ fn file_list(app: &mut App, ui: &mut Ui, events: &mut Vec<Event>) {
 
     if hovering_files {
         drop_overlay(app, ui, outer.response.rect);
+    } else if visible.is_empty() && !hovering_files {
+        accept_folder_drop(ui, outer.response.rect, &app.current_dir, events);
+    }
+    if !hovering_files {
+        paint_drag_ghost(ui, p);
     }
 }
 
@@ -1121,6 +1124,7 @@ fn header_cell(app: &mut App, ui: &mut Ui, rect: Rect, key: SortKey, label: &str
     }
     if response.clicked() {
         app.sort.toggle(key);
+        app.remember_sort();
     }
 }
 
@@ -1131,12 +1135,12 @@ fn file_row(
     ordered: &[String],
     show_modified: bool,
     events: &mut Vec<Event>,
-) {
+) -> bool {
     let p = app.palette;
     let selected = app.selected_paths.contains(&child.path);
     let renaming = app.rename_target.as_deref() == Some(child.path.as_str());
     let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click_and_drag());
     let response = clickable(response);
     let hover =
         ui.ctx()
@@ -1152,6 +1156,10 @@ fn file_row(
             sel,
         );
         ui.painter().rect_filled(rect, 8.0, bg);
+        if child.is_dir && dnd::drop_hot(&response, &child.path) {
+            ui.painter()
+                .rect_stroke(rect, 8.0, Stroke::new(1.5, p.accent), StrokeKind::Inside);
+        }
         if sel > 0.0 {
             let bar = Rect::from_min_size(
                 pos2(rect.left() + 2.0, rect.center().y - 9.0 * sel),
@@ -1251,11 +1259,29 @@ fn file_row(
         }
     }
 
-    if renaming {
-        return;
+    if renaming || app.has_job() {
+        return response.contains_pointer();
     }
 
-    if response.clicked() {
+    if response.drag_started() && !app.selected_paths.contains(&child.path) {
+        app.selected_paths.clear();
+        app.selected_paths.insert(child.path.clone());
+        app.selection_anchor = Some(child.path.clone());
+    }
+    response.dnd_set_drag_payload(MovePayload {
+        paths: dnd::paths_for_drag(&app.selected_paths, &child.path),
+    });
+    if child.is_dir
+        && let Some(paths) = dnd::take_drop(&response, &child.path)
+    {
+        events.push(Event::MoveTo {
+            paths,
+            destination: child.path.clone(),
+        });
+        return true;
+    }
+
+    if response.clicked() && !response.drag_stopped() {
         let (ctrl, shift) = ui.input(|input| (input.modifiers.command, input.modifiers.shift));
         events.push(Event::SelectEntry {
             path: child.path.clone(),
@@ -1264,7 +1290,7 @@ fn file_row(
             ordered: ordered.to_vec(),
         });
     }
-    if response.double_clicked() {
+    if response.double_clicked() && !response.drag_stopped() {
         if child.is_dir {
             events.push(Event::EnterDirectory(child.path.clone()));
         } else {
@@ -1333,6 +1359,51 @@ fn file_row(
             ui.close();
         }
     });
+    response.contains_pointer()
+}
+
+fn accept_folder_drop(ui: &Ui, rect: Rect, dest: &str, events: &mut Vec<Event>) {
+    let released = ui.input(|input| input.pointer.any_released());
+    if !released {
+        return;
+    }
+    let Some(pos) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
+    if !rect.contains(pos) {
+        return;
+    }
+    let Some(payload) = egui::DragAndDrop::payload::<MovePayload>(ui.ctx()) else {
+        return;
+    };
+    if !dnd::can_drop_into(&payload.paths, dest) {
+        return;
+    }
+    if let Some(payload) = egui::DragAndDrop::take_payload::<MovePayload>(ui.ctx()) {
+        events.push(Event::MoveTo {
+            paths: payload.paths.clone(),
+            destination: dest.to_owned(),
+        });
+    }
+}
+
+fn paint_drag_ghost(ui: &Ui, p: Palette) {
+    let Some(payload) = egui::DragAndDrop::payload::<MovePayload>(ui.ctx()) else {
+        return;
+    };
+    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
+    let text = crate::ts!("gui.browser.drag_move", count = payload.paths.len());
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("vault-move-ghost"),
+    ));
+    let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), p.text);
+    let chip = Rect::from_min_size(pointer + vec2(14.0, 16.0), galley.size() + vec2(20.0, 10.0));
+    painter.rect_filled(chip, 8.0, p.surface_elevated);
+    painter.rect_stroke(chip, 8.0, Stroke::new(1.0, p.accent), StrokeKind::Inside);
+    painter.galley(chip.min + vec2(10.0, 5.0), galley, p.text);
 }
 
 /// Inline rename editor drawn inside the row; Enter commits, Esc cancels,
@@ -1394,14 +1465,14 @@ fn rename_editor(app: &mut App, ui: &mut Ui, rect: Rect, events: &mut Vec<Event>
     }
 }
 
-fn empty_state(app: &App, ui: &mut Ui, folder_empty: bool) {
+fn empty_state(app: &App, ui: &mut Ui, folder_empty: bool, events: &mut Vec<Event>) {
     let p = app.palette;
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.22).clamp(24.0, 110.0));
         if folder_empty {
-            // Dashed drop target.
-            let (zone, _) = ui
-                .allocate_exact_size(vec2(ui.available_width().min(360.0), 150.0), Sense::hover());
+            // Dashed drop target. Right-click creates a text file here.
+            let (zone, response) = ui
+                .allocate_exact_size(vec2(ui.available_width().min(360.0), 150.0), Sense::click());
             paint_dashed_rect(ui.painter(), zone, 12.0, with_alpha(p.border_strong, 0.9));
             let icon_rect =
                 Rect::from_center_size(pos2(zone.center().x, zone.top() + 46.0), vec2(40.0, 40.0));
@@ -1420,6 +1491,13 @@ fn empty_state(app: &App, ui: &mut Ui, folder_empty: bool) {
                 FontId::proportional(12.0),
                 p.muted,
             );
+            response.context_menu(|ui| {
+                ui.set_min_width(168.0);
+                if menu_item(ui, p, Icon::File, crate::ts!("gui.browser.new_text")).clicked() {
+                    events.push(Event::NewText);
+                    ui.close();
+                }
+            });
             ui.add_space(12.0);
             ui.label(
                 RichText::new(crate::ts!("gui.browser.drop_hint"))
@@ -1729,7 +1807,7 @@ fn notification_row(p: Palette, ui: &mut Ui, note: &crate::gui::app::Notificatio
 
 #[cfg(test)]
 mod tests {
-    use super::natural_cmp;
+    use crate::gui::sort::natural_cmp;
     use std::cmp::Ordering;
 
     #[test]

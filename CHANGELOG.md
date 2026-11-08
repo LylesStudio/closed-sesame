@@ -4,6 +4,16 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **New text file from the window and the tray panel.** One click opens an in-app note in its own window, without bringing the main window forward. Text stays in memory until you save. `Ctrl+Alt+N` creates a note in the default location, `Ctrl+Alt+O` reopens the last note, and `Ctrl+Enter` saves and closes. The shortcuts work only while the vault is unlocked.
+- **Move by dragging inside the vault.** Drag a file or folder onto another folder, a breadcrumb, or empty space in the folder you are viewing. The tray panel accepts the same drop. A folder cannot be dropped into itself.
+- **Sort in the tray panel, remembered across launches.** Name, size, and modified time follow the same order as the main window (folders first, natural names). The choice is saved in `settings.json`.
+
+### Fixed
+
+- **The tray panel stays on the monitor that holds the tray icon** when the main window moves to another display, including monitors left or right of the origin and monitors with a different scale. A DPI change no longer resizes the main window a second time, and a window larger than the display it just entered is fitted back. Content protection is applied again after the move.
+
 ## 0.1.1 — 2026-10-23
 
 ### Tray flyout, embedded fonts, release script

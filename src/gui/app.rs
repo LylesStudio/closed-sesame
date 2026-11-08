@@ -19,28 +19,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
-/// File list ordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SortKey {
-    Name,
-    Size,
-    Modified,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Sort {
-    pub(crate) key: SortKey,
-    pub(crate) ascending: bool,
-}
-
-impl Default for Sort {
-    fn default() -> Self {
-        Self {
-            key: SortKey::Name,
-            ascending: true,
-        }
-    }
-}
+pub(crate) use super::sort::{Sort, SortKey};
 
 /// Widgets the browser view can be asked to focus on the next frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,18 +27,6 @@ pub(crate) enum FocusTarget {
     Rename,
     Mkdir,
     Search,
-}
-
-impl Sort {
-    /// Click on a column header: toggle direction if same key, else switch.
-    pub(crate) fn toggle(&mut self, key: SortKey) {
-        if self.key == key {
-            self.ascending = !self.ascending;
-        } else {
-            self.key = key;
-            self.ascending = key == SortKey::Name;
-        }
-    }
 }
 
 pub(crate) struct App {
@@ -127,6 +94,21 @@ pub(crate) struct App {
     suppress_minimize: bool,
     /// Tray menu asked to leave. The next close is allowed through.
     exit_requested: bool,
+    display: super::display::Stability,
+    /// Open sticky note, if any. Plaintext lives here until save or lock.
+    note: Option<super::note::NoteDraft>,
+    /// Focus the note window without touching the main window.
+    note_focus: bool,
+    /// Place the note window once, on the monitor under the pointer.
+    note_needs_place: bool,
+    /// Keep the native note window after the first show so the next open is immediate.
+    note_hosted: bool,
+    note_capture: Option<bool>,
+    /// Last note that actually exists in the vault, for the reopen shortcut.
+    last_note_path: Option<String>,
+    /// Settings field for the shortcut's default folder. Committed on focus loss.
+    pub(crate) note_dir_input: String,
+    note_hotkeys: super::hotkey::NoteHotkeys,
 }
 
 /// Kind of a status notification, derived from its status prefix.
@@ -208,6 +190,15 @@ impl Default for App {
             hidden_to_tray: false,
             suppress_minimize: false,
             exit_requested: false,
+            display: super::display::Stability::default(),
+            note: None,
+            note_focus: false,
+            note_needs_place: false,
+            note_hosted: false,
+            note_capture: None,
+            last_note_path: None,
+            note_dir_input: String::new(),
+            note_hotkeys: super::hotkey::NoteHotkeys::new(),
         }
     }
 }
@@ -248,6 +239,8 @@ impl App {
         }
         let mut app = Self::default();
         app.settings = settings.clone();
+        app.sort.key = settings.sort_key;
+        app.sort.ascending = settings.sort_ascending;
         app.anti_capture_enabled = settings.anti_capture_enabled;
         app.theme = settings.theme;
         app.palette = settings.theme.palette();
@@ -258,6 +251,7 @@ impl App {
         if let Some(locale) = app.settings.locale() {
             app.locale = locale;
         }
+        app.note_dir_input = app.settings.note_dir.clone();
         #[cfg(debug_assertions)]
         app.seed_demo();
         app
@@ -752,22 +746,36 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        let Some(session) = self.session.as_ref() else {
+        if self.session.is_none() {
             return;
+        }
+        match self.reload_entries() {
+            Ok(()) => self.set_status(ts!("gui.status.list_refreshed")),
+            Err(error) => self.set_status(ts!("gui.status.refresh_failed_short", error = error)),
+        }
+    }
+
+    /// Reload the entry list without posting a status line.
+    fn reload_entries(&mut self) -> std::result::Result<(), String> {
+        let result = match self.session.as_ref() {
+            Some(session) => actions::refresh(session).map_err(|error| error.localized()),
+            None => return Err(ts!("gui.status.sesame_locked")),
         };
-        match actions::refresh(session) {
+        match result {
             Ok(entries) => {
                 self.install_entries(entries);
-                self.set_status(ts!("gui.status.list_refreshed"));
+                #[cfg(feature = "mount")]
+                self.sync_mounted_vfs();
+                self.touch();
+                Ok(())
             }
-            Err(error) => self.set_status(ts!(
-                "gui.status.refresh_failed_short",
-                error = error.localized()
-            )),
+            Err(error) => {
+                #[cfg(feature = "mount")]
+                self.sync_mounted_vfs();
+                self.touch();
+                Err(error)
+            }
         }
-        #[cfg(feature = "mount")]
-        self.sync_mounted_vfs();
-        self.touch();
     }
 
     #[cfg(feature = "mount")]
@@ -782,6 +790,8 @@ impl App {
     }
 
     pub(crate) fn lock(&mut self) {
+        self.flush_note_on_lock();
+        self.note_hotkeys.set_armed(false);
         let reopen = self.path_input.clone();
         let unsynced = self.flush_cache_on_lock();
         if let Some(cache) = self.cache.take() {
@@ -981,7 +991,11 @@ impl App {
     }
 
     /// Open a vault file in the writable session cache and the external app.
-    fn open_in_cache(&mut self, container_path: &str) {
+    ///
+    /// Returns whether the external app was launched. `announce` posts the
+    /// generic "opened" status; callers that create the file first pass
+    /// `false` and write their own line.
+    fn open_in_cache(&mut self, container_path: &str, announce: bool) -> bool {
         // Mounted + a real local mount point: open straight through the
         // mount so edits flow via the mount write path, not the cache.
         #[cfg(feature = "mount")]
@@ -989,17 +1003,23 @@ impl App {
             let candidate =
                 crate::app::symlink::join_mount_path(mounted.mount_point(), container_path);
             if candidate.is_file() {
-                match super::open_external::open_path(&candidate) {
-                    Ok(()) => self.set_status(ts!(
-                        "gui.status.opened_file",
-                        path = candidate.display().to_string()
-                    )),
-                    Err(error) => {
-                        self.set_status(ts!("gui.status.error", error = error.localized()))
+                let opened = match super::open_external::open_path(&candidate) {
+                    Ok(()) => {
+                        if announce {
+                            self.set_status(ts!(
+                                "gui.status.opened_file",
+                                path = candidate.display().to_string()
+                            ));
+                        }
+                        true
                     }
-                }
+                    Err(error) => {
+                        self.set_status(ts!("gui.status.error", error = error.localized()));
+                        false
+                    }
+                };
                 self.touch();
-                return;
+                return opened;
             }
         }
 
@@ -1016,7 +1036,7 @@ impl App {
             self.sync_cache_entry(container_path);
             if self.dialog.is_some() {
                 // A conflict dialog is pending; let the user resolve it first.
-                return;
+                return false;
             }
             let old_path = self
                 .cache
@@ -1032,23 +1052,23 @@ impl App {
         }
         let Some(session) = self.session.as_ref() else {
             self.set_status(ts!("gui.status.sesame_locked"));
-            return;
+            return false;
         };
         let (data, vault_entry) = match actions::read_vault_file(session, container_path) {
             Ok(read) => read,
             Err(error) => {
                 self.set_status(ts!("gui.status.error", error = error.localized()));
-                return;
+                return false;
             }
         };
         let Some(cache) = self.cache.as_mut() else {
             self.set_status(ts!("gui.status.cache_unavailable"));
-            return;
+            return false;
         };
         let cache_path = cache.fresh_cache_path(container_path);
         if let Err(error) = std::fs::write(&cache_path, &data) {
             self.set_status(ts!("gui.status.error", error = error.to_string()));
-            return;
+            return false;
         }
         cache.register(cache::CacheEntry::new(
             container_path.to_owned(),
@@ -1056,14 +1076,23 @@ impl App {
             vault_entry.modified_at,
             crc32(&data),
         ));
-        match super::open_external::open_path(&cache_path) {
-            Ok(()) => self.set_status(ts!(
-                "gui.status.opened_file",
-                path = cache_path.display().to_string()
-            )),
-            Err(error) => self.set_status(ts!("gui.status.error", error = error.localized())),
-        }
+        let opened = match super::open_external::open_path(&cache_path) {
+            Ok(()) => {
+                if announce {
+                    self.set_status(ts!(
+                        "gui.status.opened_file",
+                        path = cache_path.display().to_string()
+                    ));
+                }
+                true
+            }
+            Err(error) => {
+                self.set_status(ts!("gui.status.error", error = error.localized()));
+                false
+            }
+        };
         self.touch();
+        opened
     }
 
     /// Poll the cache watcher and write back any settled edits.
@@ -1394,6 +1423,17 @@ impl App {
             return false;
         }
         true
+    }
+
+    pub(crate) fn remember_sort(&mut self) {
+        self.settings.set_sort(self.sort.key, self.sort.ascending);
+    }
+
+    pub(crate) fn move_entries(&mut self, paths: Vec<String>, destination: String) {
+        if paths.is_empty() || self.has_job() {
+            return;
+        }
+        self.start_transfer(false, paths, destination);
     }
 
     fn begin_transfer(&mut self, copy: bool) {
@@ -1824,6 +1864,11 @@ impl App {
                 }
                 self.apply_selection(path, ctrl, shift, &ordered);
             }
+            Event::NewText => {
+                let dir = self.current_dir.clone();
+                self.create_text_in(&dir);
+            }
+            Event::CommitNoteDir => self.commit_note_dir(),
             Event::Mkdir => {
                 let name = self.mkdir_input.trim().to_owned();
                 if name.is_empty() {
@@ -1900,6 +1945,7 @@ impl App {
             }
             Event::BeginCopy => self.begin_transfer(true),
             Event::BeginMove => self.begin_transfer(false),
+            Event::MoveTo { paths, destination } => self.move_entries(paths, destination),
             Event::BeginMoveOut => {
                 let paths: Vec<String> = self.selected_paths.iter().cloned().collect();
                 if !paths.is_empty() {
@@ -1934,7 +1980,11 @@ impl App {
                     self.set_status(ts!("gui.status.open_requires_file"));
                     return;
                 }
-                self.open_in_cache(&path);
+                if super::note::is_text_path(&path) {
+                    self.open_text_note(&path);
+                } else {
+                    self.open_in_cache(&path, true);
+                }
             }
             #[cfg(feature = "mount")]
             Event::Mount => self.mount_vault(),
@@ -1999,6 +2049,249 @@ impl App {
         self.add_destination = Some(dir);
     }
 
+    /// Open a sticky note for a new text file in `dir`. Nothing is written
+    /// until the note is saved.
+    pub(crate) fn create_text_in(&mut self, dir: &str) {
+        self.open_new_note(dir);
+    }
+
+    fn open_new_note(&mut self, dir: &str) {
+        if !self.is_unlocked() {
+            self.set_status(ts!("gui.status.sesame_locked"));
+            return;
+        }
+        if self.note.as_ref().is_some_and(|note| note.dirty()) {
+            self.note_banner(&ts!("gui.note.blocked"));
+            self.note_focus = true;
+            return;
+        }
+        let dir = match super::note::normalize_note_dir(dir) {
+            Ok(dir) => dir,
+            Err(()) => {
+                self.note_banner(&ts!("gui.note.invalid_dir"));
+                self.set_status(ts!("gui.note.invalid_dir"));
+                return;
+            }
+        };
+        if !dir.is_empty()
+            && self
+                .entries
+                .iter()
+                .any(|entry| entry.path == dir && !entry.is_dir)
+        {
+            self.note_banner(&ts!("gui.note.not_a_folder"));
+            self.set_status(ts!("gui.note.not_a_folder"));
+            return;
+        }
+        let stem = ts!("gui.browser.new_text_stem");
+        let file_name = actions::unique_text_file_name(
+            self.entries.iter().map(|entry| entry.path.as_str()),
+            &dir,
+            &stem,
+        );
+        let path = if dir.is_empty() {
+            file_name
+        } else {
+            format!("{dir}/{file_name}")
+        };
+        self.attach_note(super::note::NoteDraft::fresh(path));
+    }
+
+    pub(crate) fn open_text_note(&mut self, path: &str) {
+        if !self.is_unlocked() {
+            self.set_status(ts!("gui.status.sesame_locked"));
+            return;
+        }
+        if self
+            .note
+            .as_ref()
+            .is_some_and(|note| note.path != path && note.dirty())
+        {
+            self.note_banner(&ts!("gui.note.blocked"));
+            self.note_focus = true;
+            return;
+        }
+        if self.note.as_ref().is_some_and(|note| note.path == path) {
+            if let Some(note) = self.note.as_mut() {
+                note.focus_editor();
+            }
+            self.note_focus = true;
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            self.set_status(ts!("gui.status.sesame_locked"));
+            return;
+        };
+        let read = actions::read_vault_file(session, path);
+        let (data, entry) = match read {
+            Ok(read) => read,
+            Err(error) => {
+                let message = ts!("gui.status.error", error = error.localized());
+                self.note_banner(&message);
+                self.set_status(message);
+                return;
+            }
+        };
+        if entry.size > super::note::MAX_BYTES || std::str::from_utf8(&data).is_err() {
+            self.open_in_cache(path, true);
+            return;
+        }
+        let text = std::str::from_utf8(&data).unwrap_or_default();
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text).to_owned();
+        self.last_note_path = Some(path.to_owned());
+        self.attach_note(super::note::NoteDraft::loaded(path.to_owned(), text));
+    }
+
+    fn reopen_last_note(&mut self) {
+        let Some(path) = self.last_note_path.clone() else {
+            self.set_status(ts!("gui.note.no_last"));
+            return;
+        };
+        self.open_text_note(&path);
+    }
+
+    fn commit_note_dir(&mut self) {
+        match super::note::normalize_note_dir(&self.note_dir_input) {
+            Ok(dir) => {
+                self.note_dir_input.clone_from(&dir);
+                self.settings.set_note_dir(dir);
+            }
+            Err(()) => {
+                self.note_dir_input.clone_from(&self.settings.note_dir);
+                self.set_status(ts!("gui.note.invalid_dir"));
+            }
+        }
+    }
+
+    fn apply_note_command(&mut self, command: super::note::NoteCommand) {
+        match command {
+            super::note::NoteCommand::SaveClose => {
+                if self.save_open_note() {
+                    self.dismiss_note();
+                }
+            }
+            super::note::NoteCommand::Discard => self.dismiss_note(),
+            super::note::NoteCommand::Close => {
+                let dirty = self.note.as_ref().is_some_and(|note| note.dirty());
+                if dirty {
+                    let message = ts!("gui.note.unsaved");
+                    self.note_banner(&message);
+                    self.set_status(message);
+                } else {
+                    self.dismiss_note();
+                }
+            }
+        }
+    }
+
+    fn note_banner(&mut self, message: &str) {
+        if let Some(note) = self.note.as_mut() {
+            note.banner = message.to_owned();
+            note.focus_editor();
+        }
+        self.note_focus = true;
+    }
+
+    fn attach_note(&mut self, draft: super::note::NoteDraft) {
+        let reposition = self.note.is_none();
+        if let Some(mut old) = self.note.take() {
+            old.wipe();
+        }
+        self.note = Some(draft);
+        self.note_focus = true;
+        if reposition {
+            self.note_needs_place = true;
+        }
+    }
+
+    fn save_open_note(&mut self) -> bool {
+        if self.has_job() {
+            return false;
+        }
+        let Some(note) = self.note.as_ref() else {
+            return false;
+        };
+        let path = note.path.clone();
+        let mut data = note.text.clone();
+        let exists = note.exists;
+        let Some(session) = self.session.as_ref() else {
+            data.zeroize();
+            self.set_status(ts!("gui.status.sesame_locked"));
+            return false;
+        };
+        let written = {
+            #[cfg(feature = "mount")]
+            let _guard = mount_guard(&self.mounted);
+            actions::write_note(session, &path, data.as_bytes(), exists)
+        };
+        data.zeroize();
+        match written {
+            Ok(saved) => {
+                self.forget_note_cache(&saved);
+                let _ = self.reload_entries();
+                if let Some(note) = self.note.as_mut() {
+                    note.path.clone_from(&saved);
+                    note.saved.clone_from(&note.text);
+                    note.exists = true;
+                }
+                self.select_saved_note(&saved);
+                self.last_note_path = Some(saved.clone());
+                self.set_status(ts!("gui.status.note_saved", path = saved));
+                true
+            }
+            Err(error) => {
+                let message = ts!("gui.status.error", error = error.localized());
+                self.note_banner(&message);
+                self.set_status(message);
+                false
+            }
+        }
+    }
+
+    fn flush_note_on_lock(&mut self) {
+        if self.note.as_ref().is_some_and(|note| note.dirty()) {
+            let _ = self.save_open_note();
+        }
+        self.dismiss_note();
+    }
+
+    fn dismiss_note(&mut self) {
+        if let Some(note) = self.note.as_mut() {
+            note.wipe();
+        }
+        self.note = None;
+    }
+
+    fn forget_note_cache(&mut self, path: &str) {
+        let cache_path = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.entry(path))
+            .map(|entry| entry.cache_path.clone());
+        if let Some(cache) = self.cache.as_mut() {
+            cache.remove(path);
+        }
+        if let Some(path) = cache_path {
+            super::cache::zero_and_remove(&path);
+        }
+    }
+
+    fn select_saved_note(&mut self, path: &str) {
+        let parent = path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.to_owned())
+            .unwrap_or_default();
+        if parent == self.current_dir {
+            self.cancel_rename();
+            self.selected_paths.clear();
+            self.selected_paths.insert(path.to_owned());
+            self.selection_anchor = Some(path.to_owned());
+        }
+        if parent == self.flyout.dir {
+            self.flyout.selected = Some(path.to_owned());
+        }
+    }
+
     pub(crate) fn extract_one(&mut self, path: &str) {
         if self.job.is_some() {
             return;
@@ -2058,6 +2351,33 @@ impl App {
         f()
     }
 
+    fn stabilize_display(&mut self, ctx: &egui::Context) {
+        let sample = ctx.input(|input| {
+            let viewport = input.viewport();
+            let logical = viewport.inner_rect.map(|rect| rect.size())?;
+            let ppp = viewport.native_pixels_per_point?;
+            Some(super::display::Sample {
+                ppp,
+                logical,
+                monitor: viewport.monitor_size.unwrap_or(egui::Vec2::ZERO),
+                maximized: viewport.maximized.unwrap_or(false),
+            })
+        });
+        let action = self.display.observe(sample);
+        if matches!(
+            action,
+            super::display::Action::ReapplyCapture | super::display::Action::Refit(_)
+        ) {
+            // Display affinity does not always follow a window onto another adapter.
+            self.anti_capture_applied = None;
+            self.flyout.invalidate_capture();
+            ctx.request_repaint();
+        }
+        if let super::display::Action::Refit(size) = action {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+    }
+
     fn present_flyout(&mut self, ctx: &egui::Context) {
         // Keep the native window alive after the first frame so a click only
         // moves and paints it. Creating the GL surface on the click is the
@@ -2067,19 +2387,22 @@ impl App {
         }
         let open = self.flyout.open;
         let parent_ppp = ctx.input(|input| input.viewport().native_pixels_per_point.unwrap_or(1.0));
-        let ppp = self.flyout.scale().unwrap_or(parent_ppp);
-        let screen = ctx.input(|input| input.viewport().monitor_size);
+        // Divide by this window's own scale. The main window may sit on a
+        // different monitor, and using its scale places the panel at the
+        // wrong physical pixel — then the next frame corrects it and the
+        // panel jumps back.
+        let ppp = ctx
+            .input_for(super::flyout::viewport_id(), |input| {
+                input.viewport().native_pixels_per_point
+            })
+            .filter(|ppp| ppp.is_finite() && *ppp > 0.1)
+            .or(self.flyout.scale())
+            .unwrap_or(parent_ppp);
         let size = super::flyout::window_size();
         // Off-screen, but still visible on Windows, so a tray click can wake
         // this window without the hidden-root repaint throttle.
         let origin = if open {
-            let card = super::flyout::place_flyout(
-                &self.flyout.anchor,
-                ppp,
-                screen,
-                egui::vec2(super::flyout::CARD_WIDTH, super::flyout::CARD_HEIGHT),
-            );
-            super::flyout::window_origin(card)
+            super::flyout::place_for_anchor(&self.flyout.anchor, ppp)
         } else {
             egui::pos2(-10000.0, -10000.0)
         };
@@ -2111,11 +2434,12 @@ impl App {
         let builder = builder.with_transparent(true);
         ctx.show_viewport_immediate(super::flyout::viewport_id(), builder, |ui, _class| {
             super::flyout::round_window_frame();
+            let child_ppp =
+                ui.input(|input| input.viewport().native_pixels_per_point.unwrap_or(ppp));
+            self.flyout.note_window_scale(child_ppp);
             if !self.flyout.open {
                 return;
             }
-            let child_ppp =
-                ui.input(|input| input.viewport().native_pixels_per_point.unwrap_or(ppp));
             if self.flyout.consume_window_focus() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
             }
@@ -2125,8 +2449,83 @@ impl App {
             {
                 self.handle_dialog_outcome(outcome);
             }
-            if self.flyout.open && (child_ppp - ppp).abs() > 0.05 {
-                self.flyout.note_scale(child_ppp);
+        });
+    }
+
+    fn present_note(&mut self, ctx: &egui::Context) {
+        if self.exit_requested {
+            return;
+        }
+        let open = self.note.is_some();
+        if open {
+            self.note_hosted = true;
+        }
+        if !self.note_hosted {
+            return;
+        }
+        let parent_ppp = ctx.input(|input| input.viewport().native_pixels_per_point.unwrap_or(1.0));
+        let ppp = ctx
+            .input_for(super::note::viewport_id(), |input| {
+                input.viewport().native_pixels_per_point
+            })
+            .filter(|ppp| ppp.is_finite() && *ppp > 0.1)
+            .unwrap_or(parent_ppp);
+        let size = egui::vec2(super::note::WIDTH, super::note::HEIGHT);
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title(super::note::WINDOW_TITLE)
+            .with_inner_size(size)
+            .with_min_inner_size(size)
+            .with_max_inner_size(size)
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_close_button(false)
+            .with_minimize_button(false)
+            .with_maximize_button(false)
+            // Never toggle this: egui recreates the window when it changes.
+            .with_active(false)
+            .with_visible(open || cfg!(windows))
+            .with_mouse_passthrough(!open)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+            .with_titlebar_buttons_shown(false)
+            .with_has_shadow(true);
+        if !open {
+            builder = builder.with_position(egui::pos2(-10000.0, -10000.0));
+        } else if self.note_needs_place {
+            builder = builder.with_position(super::note::place_near_cursor(ppp));
+            self.note_needs_place = false;
+        }
+        let focus = std::mem::take(&mut self.note_focus);
+        ctx.show_viewport_immediate(super::note::viewport_id(), builder, |ui, _class| {
+            if self.note.is_none() {
+                return;
+            }
+            let enabled = self.anti_capture_enabled && self.is_unlocked();
+            if self.note_capture != Some(enabled) {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::ContentProtected(enabled));
+                self.note_capture = Some(enabled);
+            }
+            if focus {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            let active = ui.input(|input| {
+                input.pointer.any_down()
+                    || input.pointer.delta() != egui::Vec2::ZERO
+                    || input.smooth_scroll_delta != egui::Vec2::ZERO
+                    || !input.events.is_empty()
+            });
+            if active {
+                self.touch();
+            }
+            let command = self
+                .note
+                .as_mut()
+                .and_then(|draft| super::note::show(ui, draft, self.palette));
+            if let Some(command) = command {
+                self.apply_note_command(command);
             }
         });
     }
@@ -2276,6 +2675,7 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.stabilize_display(ctx);
         self.service_tray(ctx);
         if self.job.is_some() {
             self.touch();
@@ -2284,7 +2684,7 @@ impl eframe::App for App {
         }
         // A hidden main window pauses auto-lock. The tray panel is a visible
         // surface, so idle time counts while it is open.
-        let surface_open = !self.hidden_to_tray || self.flyout.open;
+        let surface_open = !self.hidden_to_tray || self.flyout.open || self.note.is_some();
         if !surface_open {
             self.touch();
         } else if self.is_unlocked() && self.job.is_none() && self.auto_lock.expired() {
@@ -2295,9 +2695,26 @@ impl eframe::App for App {
         if self.is_unlocked() {
             self.poll_cache(ctx);
         }
+        super::hotkey::NoteHotkeys::install_wake(ctx.clone());
+        self.note_hotkeys
+            .set_armed(self.is_unlocked() && !self.exit_requested);
+        if self.is_unlocked() {
+            for hit in self.note_hotkeys.take() {
+                match hit {
+                    super::hotkey::NoteHotkey::New => {
+                        let dir = self.settings.note_dir.clone();
+                        self.open_new_note(&dir);
+                    }
+                    super::hotkey::NoteHotkey::Reopen => self.reopen_last_note(),
+                }
+            }
+        } else {
+            let _ = self.note_hotkeys.take();
+        }
         self.present_flyout(ctx);
+        self.present_note(ctx);
         if self.tray.is_some() && !self.exit_requested {
-            let wait = if self.flyout.open {
+            let wait = if self.flyout.open || self.note.is_some() {
                 80
             } else if self.hidden_to_tray {
                 200

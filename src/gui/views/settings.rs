@@ -173,6 +173,36 @@ fn settings_column(app: &mut App, ui: &mut Ui, events: &mut Vec<Event>) {
         note(ui, p, crate::ts!("gui.settings.extract_note"));
     });
 
+    settings_card(ui, p, Icon::Edit, crate::ts!("gui.settings.notes"), |ui| {
+        ui.label(
+            RichText::new(crate::ts!("gui.note.default_dir"))
+                .size(12.0)
+                .color(p.muted),
+        );
+        ui.add_space(6.0);
+        let response = crate::gui::widgets::input_field(
+            ui,
+            p,
+            &mut app.note_dir_input,
+            crate::ts!("gui.note.dir_placeholder"),
+            Some(Icon::Folder),
+            false,
+            1.0,
+        );
+        let commit = response.lost_focus()
+            || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+        if commit {
+            events.push(Event::CommitNoteDir);
+        }
+        ui.add_space(8.0);
+        if ghost_button(ui, p, crate::ts!("gui.note.use_current")).clicked() {
+            app.note_dir_input.clone_from(&app.current_dir);
+            events.push(Event::CommitNoteDir);
+        }
+        ui.add_space(8.0);
+        note(ui, p, crate::ts!("gui.note.default_dir_hint"));
+    });
+
     if app.is_unlocked() {
         settings_card(
             ui,

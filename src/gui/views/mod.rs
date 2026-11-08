@@ -28,6 +28,10 @@ pub(crate) enum Event {
         ordered: Vec<String>,
     },
     Mkdir,
+    /// Create an empty `.txt` in the current folder and open it.
+    NewText,
+    /// Store the default folder for shortcut-created notes.
+    CommitNoteDir,
     RemoveSelected,
     /// Start inline rename of the single selected entry.
     BeginRename,
@@ -39,6 +43,12 @@ pub(crate) enum Event {
     ExtractSelected,
     BeginCopy,
     BeginMove,
+    /// Drop onto a folder inside the vault. `destination` is a directory path;
+    /// empty is the root.
+    MoveTo {
+        paths: Vec<String>,
+        destination: String,
+    },
     BeginMoveOut,
     OpenSelected,
     #[cfg(feature = "mount")]

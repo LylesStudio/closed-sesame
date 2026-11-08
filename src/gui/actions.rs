@@ -402,6 +402,127 @@ pub(crate) fn mkdir(session: &Session, name: &str, current_dir: &str) -> Result<
     Ok(())
 }
 
+/// File name (not a full path) for a new empty text file in `dir`.
+///
+/// `dir` is empty at the vault root. Existing siblings get ` (2)`, ` (3)`, …
+pub(crate) fn unique_text_file_name<'a>(
+    existing: impl IntoIterator<Item = &'a str>,
+    dir: &str,
+    stem: &str,
+) -> String {
+    let taken: BTreeSet<&str> = existing.into_iter().collect();
+    let stem = sanitize_text_stem(stem);
+    let unused = |name: &str| {
+        let path = if dir.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{dir}/{name}")
+        };
+        !taken.contains(path.as_str())
+    };
+    let first = format!("{stem}.txt");
+    if unused(&first) {
+        return first;
+    }
+    for index in 2..10_000 {
+        let name = format!("{stem} ({index}).txt");
+        if unused(&name) {
+            return name;
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    format!("{stem} ({stamp}).txt")
+}
+
+fn sanitize_text_stem(stem: &str) -> String {
+    let mut cleaned = String::new();
+    for ch in stem.chars() {
+        if ch == '/' || ch == '\\' || ch == '\0' || ch.is_control() {
+            continue;
+        }
+        cleaned.push(ch);
+    }
+    let cleaned = cleaned.trim().trim_matches('.').trim();
+    let cleaned = cleaned.trim_end_matches([' ', '.']);
+    if cleaned.is_empty() {
+        return "New text".to_owned();
+    }
+    if cleaned.len() <= 80 {
+        return cleaned.to_owned();
+    }
+    let mut end = 80;
+    while !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    let trimmed = cleaned[..end].trim_end_matches([' ', '.']);
+    if trimmed.is_empty() {
+        "New text".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Create an empty `.txt` in `dir` (empty means the vault root) and return its path.
+///
+/// The note editor writes through [`write_note`] instead; this remains for tests.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn create_text_file(session: &Session, dir: &str, stem: &str) -> Result<String> {
+    let dir = if dir.trim().is_empty() {
+        String::new()
+    } else {
+        crate::container::path::normalize(dir.trim())?
+    };
+    let listed = vault::list_with_credentials(&session.path, &session.credentials)?;
+    let file_name =
+        unique_text_file_name(listed.iter().map(|entry| entry.path.as_str()), &dir, stem);
+    let target = if dir.is_empty() {
+        crate::container::path::normalize(&file_name)?
+    } else {
+        join(&dir, &file_name)?
+    };
+    if listed.iter().any(|entry| entry.path == target) {
+        return Err(SesameError::InvalidInput(keys::DESTINATION_EXISTS.into()));
+    }
+    crate::container::ContainerWriter::open(&session.path, &session.credentials)?
+        .add_file_data(b"", &target, None, false)?;
+    Ok(target)
+}
+
+/// Write note bytes. An existing file is replaced in place. A new path that
+/// was taken since the draft was opened gets the next free name.
+pub(crate) fn write_note(
+    session: &Session,
+    planned: &str,
+    data: &[u8],
+    exists: bool,
+) -> Result<String> {
+    let planned = crate::container::path::normalize(planned)?;
+    if exists {
+        vault::replace_with_credentials(&session.path, &session.credentials, &planned, data)?;
+        return Ok(planned);
+    }
+    let listed = vault::list_with_credentials(&session.path, &session.credentials)?;
+    let path = if listed.iter().any(|entry| entry.path == planned) {
+        let dir = crate::container::path::parent(&planned).unwrap_or("");
+        let file_name = crate::container::path::file_name(&planned);
+        let stem = file_name.strip_suffix(".txt").unwrap_or(file_name);
+        let name = unique_text_file_name(listed.iter().map(|entry| entry.path.as_str()), dir, stem);
+        if dir.is_empty() {
+            crate::container::path::normalize(&name)?
+        } else {
+            join(dir, &name)?
+        }
+    } else {
+        planned
+    };
+    crate::container::ContainerWriter::open(&session.path, &session.credentials)?
+        .add_file_data(data, &path, None, false)?;
+    Ok(path)
+}
+
 pub(crate) fn cleanup_symlinks_for_removed(session: &mut Session, removed: &[crate::FileEntry]) {
     use crate::app::symlink::remove_symlink_at;
     for entry in removed {
@@ -553,6 +674,46 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == "docs/pkg/inner/file.txt")
         );
+    }
+
+    #[test]
+    fn text_names_skip_existing_siblings_only() {
+        let existing = ["Note.txt", "Note (2).txt", "docs/Note.txt"];
+        assert_eq!(unique_text_file_name(existing, "", "Note"), "Note (3).txt");
+        assert_eq!(
+            unique_text_file_name(existing, "docs", "Note"),
+            "Note (2).txt"
+        );
+        assert_eq!(unique_text_file_name(existing, "other", "Note"), "Note.txt");
+        assert_eq!(unique_text_file_name(["a"], "", "  /"), "New text.txt");
+    }
+
+    #[test]
+    fn create_text_file_writes_empty_txt_and_avoids_collisions() {
+        let temp = tempfile::tempdir().unwrap();
+        let created = create(&temp.path().join("vault"), 1024 * 1024, "", true).unwrap();
+        let first = create_text_file(&created.session, "", "Note").unwrap();
+        assert_eq!(first, "Note.txt");
+        let (data, entry) = read_vault_file(&created.session, &first).unwrap();
+        assert!(data.is_empty());
+        assert!(!entry.is_directory);
+        let second = create_text_file(&created.session, "", "Note").unwrap();
+        assert_eq!(second, "Note (2).txt");
+        let nested = create_text_file(&created.session, "docs", "Note").unwrap();
+        assert_eq!(nested, "docs/Note.txt");
+    }
+
+    #[test]
+    fn write_note_creates_then_replaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let created = create(&temp.path().join("vault"), 1024 * 1024, "", true).unwrap();
+        let path = write_note(&created.session, "notes/Note.txt", b"hello", false).unwrap();
+        assert_eq!(path, "notes/Note.txt");
+        let (data, _) = read_vault_file(&created.session, &path).unwrap();
+        assert_eq!(data, b"hello");
+        write_note(&created.session, &path, b"updated", true).unwrap();
+        let (data, _) = read_vault_file(&created.session, &path).unwrap();
+        assert_eq!(data, b"updated");
     }
 
     #[test]

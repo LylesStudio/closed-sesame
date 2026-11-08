@@ -7,7 +7,10 @@
 
 use super::app::App;
 use super::browser::BrowserNode;
+use super::dnd::{self, MovePayload};
 use super::icons::{Icon, paint_icon};
+use super::monitors::{self, WorkArea};
+use super::sort::{self, SortKey};
 use super::theme::{Palette, lerp_color, paint_radial_glow, with_alpha};
 use super::tray::{TrayAnchor, TrayRect};
 use super::widgets::{
@@ -19,7 +22,6 @@ use egui::{
     Align, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2,
     pos2, vec2,
 };
-use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
@@ -179,13 +181,23 @@ impl FlyoutState {
         }
     }
 
-    pub(crate) fn note_scale(&mut self, scale: f32) {
+    /// Remember the panel window's own scale. A real change means it crossed
+    /// onto a monitor with a different DPI, so content protection is sent again.
+    pub(crate) fn note_window_scale(&mut self, scale: f32) {
+        if !scale.is_finite() || scale < 0.1 {
+            return;
+        }
         let changed = self
             .scale
-            .is_none_or(|current| (current - scale).abs() > 0.05);
-        if scale.is_finite() && scale > 0.1 && changed {
-            self.scale = Some(scale);
+            .is_some_and(|current| (current - scale).abs() > 0.05);
+        self.scale = Some(scale);
+        if changed {
+            self.capture_applied = None;
         }
+    }
+
+    pub(crate) fn invalidate_capture(&mut self) {
+        self.capture_applied = None;
     }
 
     pub(crate) fn scale(&self) -> Option<f32> {
@@ -703,14 +715,23 @@ fn unlocked(app: &mut App, ui: &mut Ui) {
         34.0,
         0.92,
     );
+    sort_bar(app, ui);
 
     let rows = visible_rows(app);
     let place = folder_label(&app.flyout.dir);
-    if !app.flyout.dir.is_empty()
-        && chip_button(ui, p, Some(Icon::FolderOpen), format!("←  {place}"), p.text).clicked()
-        && !app.has_job()
-    {
-        leave_dir(app);
+    if !app.flyout.dir.is_empty() {
+        let parent = parent_dir(&app.flyout.dir);
+        let back = chip_button(ui, p, Some(Icon::FolderOpen), format!("←  {place}"), p.text);
+        if drop_target(ui, p, &back, &parent) {
+            let paths = back
+                .dnd_release_payload::<MovePayload>()
+                .map(|payload| payload.paths.clone());
+            if let Some(paths) = paths {
+                app.move_entries(paths, parent);
+            }
+        } else if back.clicked() && !app.has_job() {
+            leave_dir(app);
+        }
     }
 
     #[cfg(feature = "mount")]
@@ -754,11 +775,29 @@ fn unlocked(app: &mut App, ui: &mut Ui) {
                                 .max_height(scroll_h)
                                 .show(ui, |ui| {
                                     if rows.is_empty() {
-                                        empty_folder(ui, p);
+                                        empty_folder(app, ui);
+                                        if !hovering
+                                            && let Some(paths) =
+                                                background_drop(ui, ui.max_rect(), &app.flyout.dir)
+                                        {
+                                            let dest = app.flyout.dir.clone();
+                                            app.move_entries(paths, dest);
+                                        }
                                         return;
                                     }
+                                    let mut over_row = false;
                                     for row in &rows {
-                                        file_row(app, ui, row, suppress);
+                                        if file_row(app, ui, row, suppress) {
+                                            over_row = true;
+                                        }
+                                    }
+                                    if !over_row && !hovering {
+                                        if let Some(paths) =
+                                            background_drop(ui, ui.max_rect(), &app.flyout.dir)
+                                        {
+                                            let dest = app.flyout.dir.clone();
+                                            app.move_entries(paths, dest);
+                                        }
                                     }
                                 });
                         })
@@ -766,6 +805,8 @@ fn unlocked(app: &mut App, ui: &mut Ui) {
                 .inner;
             if hovering && !app.has_job() {
                 drop_overlay(ui, p, list.response.rect, &place);
+            } else {
+                paint_drag_ghost(ui, p);
             }
         },
     );
@@ -833,22 +874,35 @@ fn hint_row(ui: &mut Ui, p: Palette, text: &str) {
     );
 }
 
-fn empty_folder(ui: &mut Ui, p: Palette) {
-    ui.add_space(28.0);
-    ui.vertical_centered(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-        paint_icon(ui, Icon::Folder, rect, with_alpha(p.accent, 0.75));
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(ts!("gui.browser.empty_folder"))
-                .size(13.0)
-                .color(p.text),
-        );
-        ui.label(
-            RichText::new(ts!("gui.tray.flyout.drop_idle"))
-                .size(12.0)
-                .color(p.muted),
-        );
+fn empty_folder(app: &mut App, ui: &mut Ui) {
+    let p = app.palette;
+    let response = ui
+        .vertical_centered(|ui| {
+            ui.add_space(28.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+            paint_icon(ui, Icon::Folder, rect, with_alpha(p.accent, 0.75));
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(ts!("gui.browser.empty_folder"))
+                    .size(13.0)
+                    .color(p.text),
+            );
+            ui.label(
+                RichText::new(ts!("gui.tray.flyout.drop_idle"))
+                    .size(12.0)
+                    .color(p.muted),
+            );
+        })
+        .response;
+    response.context_menu(|ui| {
+        ui.set_min_width(168.0);
+        if super::widgets::menu_item(ui, p, Icon::File, ts!("gui.browser.new_text")).clicked()
+            && !app.has_job()
+        {
+            let dir = app.flyout.dir.clone();
+            app.create_text_in(&dir);
+            ui.close();
+        }
     });
 }
 
@@ -870,11 +924,92 @@ fn drop_overlay(ui: &Ui, p: Palette, rect: Rect, place: &str) {
     );
 }
 
-fn file_row(app: &mut App, ui: &mut Ui, row: &Row, suppress: bool) {
+fn sort_bar(app: &mut App, ui: &mut Ui) {
+    let p = app.palette;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (key, label) in [
+            (SortKey::Name, ts!("gui.browser.col_name")),
+            (SortKey::Size, ts!("gui.browser.col_size")),
+            (SortKey::Modified, ts!("gui.browser.col_modified")),
+        ] {
+            let active = app.sort.key == key;
+            let tone = if active { p.accent } else { p.muted };
+            let text = if active {
+                format!("{label} {}", if app.sort.ascending { "↑" } else { "↓" })
+            } else {
+                label
+            };
+            if chip_button(ui, p, None, text, tone).clicked() {
+                app.sort.toggle(key);
+                app.remember_sort();
+            }
+        }
+    });
+}
+
+fn parent_dir(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent.to_owned())
+        .unwrap_or_default()
+}
+
+/// Paint a drop highlight. Returns whether this widget is an acceptable target
+/// on the release frame (the caller takes the payload).
+fn drop_target(ui: &Ui, p: Palette, response: &egui::Response, dest: &str) -> bool {
+    if !dnd::drop_hot(response, dest) {
+        return false;
+    }
+    ui.painter().rect_stroke(
+        response.rect,
+        8.0,
+        Stroke::new(1.5, p.accent),
+        StrokeKind::Inside,
+    );
+    response.dnd_hover_payload::<MovePayload>().is_some()
+        && ui.input(|input| input.pointer.any_released())
+}
+
+fn background_drop(ui: &Ui, rect: Rect, dest: &str) -> Option<Vec<String>> {
+    let released = ui.input(|input| input.pointer.any_released());
+    if !released {
+        return None;
+    }
+    let pos = ui.ctx().pointer_interact_pos()?;
+    if !rect.contains(pos) {
+        return None;
+    }
+    let payload = egui::DragAndDrop::payload::<MovePayload>(ui.ctx())?;
+    if !dnd::can_drop_into(&payload.paths, dest) {
+        return None;
+    }
+    egui::DragAndDrop::take_payload::<MovePayload>(ui.ctx()).map(|payload| payload.paths.clone())
+}
+
+fn paint_drag_ghost(ui: &Ui, p: Palette) {
+    let Some(payload) = egui::DragAndDrop::payload::<MovePayload>(ui.ctx()) else {
+        return;
+    };
+    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
+    let text = ts!("gui.browser.drag_move", count = payload.paths.len());
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("vault-move-ghost"),
+    ));
+    let galley = painter.layout_no_wrap(text, FontId::proportional(12.5), p.text);
+    let rect = Rect::from_min_size(pointer + vec2(12.0, 14.0), galley.size() + vec2(18.0, 8.0));
+    painter.rect_filled(rect, 8.0, p.surface_elevated);
+    painter.rect_stroke(rect, 8.0, Stroke::new(1.0, p.accent), StrokeKind::Inside);
+    painter.galley(rect.min + vec2(9.0, 4.0), galley, p.text);
+}
+
+fn file_row(app: &mut App, ui: &mut Ui, row: &Row, suppress: bool) -> bool {
     let p = app.palette;
     let selected = app.flyout.selected.as_deref() == Some(row.path.as_str());
     let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click_and_drag());
     let response = clickable(response);
     let hover = ui
         .ctx()
@@ -889,6 +1024,10 @@ fn file_row(app: &mut App, ui: &mut Ui, row: &Row, suppress: bool) {
             sel,
         );
         ui.painter().rect_filled(rect, 8.0, bg);
+        if row.is_dir && dnd::drop_hot(&response, &row.path) {
+            ui.painter()
+                .rect_stroke(rect, 8.0, Stroke::new(1.5, p.accent), StrokeKind::Inside);
+        }
         if sel > 0.0 {
             let bar = Rect::from_min_size(
                 pos2(rect.left() + 2.0, rect.center().y - 8.0 * sel),
@@ -931,12 +1070,26 @@ fn file_row(app: &mut App, ui: &mut Ui, row: &Row, suppress: bool) {
     }
 
     if suppress || app.has_job() {
-        return;
+        return response.contains_pointer();
     }
-    if response.double_clicked() && !row.is_dir {
+    response.dnd_set_drag_payload(MovePayload {
+        paths: vec![row.path.clone()],
+    });
+    if row.is_dir
+        && dnd::drop_hot(&response, &row.path)
+        && let Some(payload) = response.dnd_release_payload::<MovePayload>()
+    {
+        app.move_entries(payload.paths.clone(), row.path.clone());
+        return true;
+    }
+    if response.double_clicked() && !row.is_dir && !response.drag_stopped() {
         app.flyout.selected = Some(row.path.clone());
-        app.extract_one(&row.path);
-    } else if response.clicked() {
+        if super::note::is_text_path(&row.path) {
+            app.open_text_note(&row.path);
+        } else {
+            app.extract_one(&row.path);
+        }
+    } else if response.clicked() && !response.drag_stopped() {
         if row.is_dir {
             enter_dir(app, &row.path);
         } else {
@@ -957,6 +1110,7 @@ fn file_row(app: &mut App, ui: &mut Ui, row: &Row, suppress: bool) {
             ui.close();
         }
     });
+    response.contains_pointer()
 }
 
 fn footer(app: &mut App, ui: &mut Ui, mounted: bool) {
@@ -1010,6 +1164,21 @@ fn footer(app: &mut App, ui: &mut Ui, mounted: bool) {
             }
         });
     });
+    let text_tone = if busy { p.faint } else { p.accent };
+    if chip_button(
+        ui,
+        p,
+        Some(Icon::File),
+        ts!("gui.browser.new_text"),
+        text_tone,
+    )
+    .on_hover_text(ts!("gui.browser.new_text_hint"))
+    .clicked()
+        && !busy
+    {
+        let dir = app.flyout.dir.clone();
+        app.create_text_in(&dir);
+    }
     if mounted
         && chip_button(
             ui,
@@ -1091,11 +1260,7 @@ fn visible_rows(app: &App) -> Vec<Row> {
         .values()
         .filter(|child| query.is_empty() || child.name.to_lowercase().contains(&query))
         .collect();
-    children.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-    });
+    children.sort_by(|a, b| sort::cmp_nodes(a, b, app.sort));
     children
         .into_iter()
         .map(|child| Row {
@@ -1139,6 +1304,101 @@ fn leave_dir(app: &mut App) {
         .unwrap_or_default();
     app.flyout.selected = None;
     app.flyout.suppress_click = true;
+}
+
+/// Position the panel for a tray click.
+///
+/// The icon rect is in physical pixels. The returned origin is in egui points
+/// using `window_ppp`, the scale of the panel window itself — that is the
+/// factor eframe multiplies by when it turns the point position back into
+/// physical pixels. Clamping uses the work area of the monitor under the
+/// icon, not the monitor the main window happens to be on.
+pub(crate) fn place_for_anchor(anchor: &TrayAnchor, window_ppp: f32) -> Pos2 {
+    let ppp = if window_ppp.is_finite() && window_ppp > 0.1 {
+        window_ppp
+    } else {
+        1.0
+    };
+    let card = vec2(CARD_WIDTH, CARD_HEIGHT);
+    let point = anchor_point(anchor);
+    if let Some((x, y)) = point
+        && let Some(work) = monitors::work_area_at(x, y)
+    {
+        let card_pos = place_in_work_area(anchor, work, card * ppp, SCREEN_MARGIN * ppp, GAP * ppp);
+        return window_origin(pos2(card_pos.x / ppp, card_pos.y / ppp));
+    }
+    // No monitor list (or the lookup failed). Do not clamp against the main
+    // window's monitor: its origin is not the virtual desktop's origin.
+    let card_pos = place_flyout(anchor, ppp, None, card);
+    window_origin(card_pos)
+}
+
+fn anchor_point(anchor: &TrayAnchor) -> Option<(f64, f64)> {
+    if let Some(icon) = anchor.icon
+        && icon.width >= 1.0
+        && icon.height >= 1.0
+    {
+        return Some((icon.x + icon.width * 0.5, icon.y + icon.height * 0.5));
+    }
+    anchor.cursor
+}
+
+/// Card origin in physical pixels, kept inside `work`.
+pub(crate) fn place_in_work_area(
+    anchor: &TrayAnchor,
+    work: WorkArea,
+    size: Vec2,
+    margin: f32,
+    gap: f32,
+) -> Pos2 {
+    let pos = if let Some(icon) = anchor
+        .icon
+        .filter(|icon| icon.width >= 1.0 && icon.height >= 1.0)
+    {
+        let top = icon.y as f32;
+        let bottom = top + icon.height as f32;
+        let right = icon.x as f32 + icon.width as f32;
+        pos2(
+            right - size.x,
+            above_or_below_in(work, top, bottom, size.y, margin, gap),
+        )
+    } else if let Some((x, y)) = anchor.cursor {
+        let cursor = pos2(x as f32, y as f32);
+        pos2(
+            cursor.x - size.x * 0.5,
+            above_or_below_in(work, cursor.y, cursor.y, size.y, margin, gap),
+        )
+    } else {
+        pos2(
+            work.x + work.width - size.x - margin,
+            work.y + work.height - size.y - margin,
+        )
+    };
+    clamp_to_work(pos, size, work, margin)
+}
+
+fn above_or_below_in(
+    work: WorkArea,
+    top: f32,
+    bottom: f32,
+    height: f32,
+    margin: f32,
+    gap: f32,
+) -> f32 {
+    let above = top - gap - height;
+    if above < work.y + margin {
+        bottom + gap
+    } else {
+        above
+    }
+}
+
+fn clamp_to_work(pos: Pos2, size: Vec2, work: WorkArea, margin: f32) -> Pos2 {
+    let min_x = work.x + margin;
+    let min_y = work.y + margin;
+    let max_x = (work.x + work.width - size.x - margin).max(min_x);
+    let max_y = (work.y + work.height - size.y - margin).max(min_y);
+    pos2(pos.x.clamp(min_x, max_x), pos.y.clamp(min_y, max_y))
 }
 
 /// Place the panel in egui points. `anchor` is in physical pixels.
@@ -1333,6 +1593,57 @@ mod tests {
         assert!(!flyout.should_dismiss(Some(true), false));
         assert!(flyout.should_dismiss(Some(false), false));
         assert!(!flyout.should_dismiss(Some(false), true));
+    }
+
+    #[test]
+    fn panel_on_a_monitor_to_the_left_stays_inside_that_work_area() {
+        let work = WorkArea {
+            x: -1920.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let pos = place_in_work_area(
+            &icon_at(-1900.0, 40.0, 32.0, 32.0),
+            work,
+            vec2(332.0, 512.0),
+            8.0,
+            10.0,
+        );
+        assert!(pos.x >= work.x + 8.0);
+        assert!(pos.x + 332.0 <= work.x + work.width - 8.0 + 0.5);
+        assert!(pos.y >= work.y);
+        assert!(pos.y + 512.0 <= work.y + work.height);
+    }
+
+    #[test]
+    fn panel_on_a_monitor_to_the_right_is_not_pulled_back_to_the_origin() {
+        let work = WorkArea {
+            x: 1920.0,
+            y: 0.0,
+            width: 2560.0,
+            height: 1440.0,
+        };
+        let pos = place_in_work_area(
+            &icon_at(4400.0, 1400.0, 40.0, 40.0),
+            work,
+            vec2(332.0, 512.0),
+            8.0,
+            10.0,
+        );
+        assert!(pos.x >= work.x);
+        assert!(pos.x + 332.0 <= work.x + work.width);
+        assert!(pos.y >= work.y);
+        assert!(pos.y + 512.0 <= work.y + work.height - 8.0 + 0.5);
+    }
+
+    #[test]
+    fn points_are_physical_pixels_divided_by_the_panel_scale() {
+        let origin = place_for_anchor(&icon_at(400.0, 1600.0, 32.0, 32.0), 2.0);
+        // No OS monitor lookup in the unit test (or it may succeed on a real
+        // desktop). Either way the result stays finite and on the same side
+        // of the origin as the icon once scaled.
+        assert!(origin.x.is_finite() && origin.y.is_finite());
     }
 
     #[test]

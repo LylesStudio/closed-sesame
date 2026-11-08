@@ -1,5 +1,6 @@
 //! Persistent GUI settings (locale, etc.).
 
+use super::sort::SortKey;
 use super::theme::Theme;
 use crate::i18n::Locale;
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,13 @@ pub struct GuiSettings {
     pub auto_lock_enabled: bool,
     #[serde(default = "default_auto_lock_minutes")]
     pub auto_lock_minutes: u32,
+    #[serde(default)]
+    pub sort_key: SortKey,
+    #[serde(default = "default_true")]
+    pub sort_ascending: bool,
+    /// Vault directory for notes created with the shortcut. Empty is the root.
+    #[serde(default)]
+    pub note_dir: String,
 }
 
 fn default_auto_lock_minutes() -> u32 {
@@ -79,6 +87,9 @@ impl Default for GuiSettings {
             theme: Theme::default(),
             auto_lock_enabled: true,
             auto_lock_minutes: default_auto_lock_minutes(),
+            sort_key: SortKey::Name,
+            sort_ascending: true,
+            note_dir: String::new(),
         }
     }
 }
@@ -134,6 +145,17 @@ impl GuiSettings {
     pub fn set_auto_lock(&mut self, enabled: bool, minutes: u32) {
         self.auto_lock_enabled = enabled;
         self.auto_lock_minutes = minutes.clamp(1, 60);
+        self.save();
+    }
+
+    pub fn set_sort(&mut self, key: SortKey, ascending: bool) {
+        self.sort_key = key;
+        self.sort_ascending = ascending;
+        self.save();
+    }
+
+    pub fn set_note_dir(&mut self, dir: String) {
+        self.note_dir = dir;
         self.save();
     }
 }
@@ -192,5 +214,16 @@ mod tests {
         assert_eq!(settings.theme, Theme::Parchment);
         assert!(!settings.auto_lock_enabled);
         assert_eq!(settings.auto_lock_minutes, 25);
+        assert_eq!(settings.sort_key, SortKey::Name);
+        assert!(settings.sort_ascending);
+        assert!(settings.note_dir.is_empty());
+    }
+
+    #[test]
+    fn sort_round_trips() {
+        let settings: GuiSettings =
+            serde_json::from_str(r#"{"sort_key":"modified","sort_ascending":false}"#).unwrap();
+        assert_eq!(settings.sort_key, SortKey::Modified);
+        assert!(!settings.sort_ascending);
     }
 }
