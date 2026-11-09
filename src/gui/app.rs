@@ -789,8 +789,12 @@ impl App {
         let _ = mounted.refresh_vault(session.path(), session.credentials());
     }
 
-    pub(crate) fn lock(&mut self) {
-        self.flush_note_on_lock();
+    /// Returns false without tearing down the session if a dirty note cannot save.
+    pub(crate) fn lock(&mut self) -> bool {
+        if !self.flush_note_on_lock() {
+            self.touch();
+            return false;
+        }
         self.note_hotkeys.set_armed(false);
         let reopen = self.path_input.clone();
         let unsynced = self.flush_cache_on_lock();
@@ -836,6 +840,7 @@ impl App {
                 count = unsynced.len()
             ));
         }
+        true
     }
 
     /// Flush every dirty cache file into the vault before locking.
@@ -1848,7 +1853,9 @@ impl App {
             }
             Event::AddPaths(paths) => self.request_add_files(paths),
             Event::Refresh => self.refresh(),
-            Event::Lock => self.lock(),
+            Event::Lock => {
+                self.lock();
+            }
             Event::EnterDirectory(path) => {
                 self.current_dir = path;
                 self.clear_selection();
@@ -2248,11 +2255,15 @@ impl App {
         }
     }
 
-    fn flush_note_on_lock(&mut self) {
-        if self.note.as_ref().is_some_and(|note| note.dirty()) {
-            let _ = self.save_open_note();
+    fn flush_note_on_lock(&mut self) -> bool {
+        if self.note.as_ref().is_some_and(|note| note.dirty()) && !self.save_open_note() {
+            let message = format!("{} {}", ts!("gui.note.lock_blocked"), self.status);
+            self.note_banner(&message);
+            self.set_status(message);
+            return false;
         }
         self.dismiss_note();
+        true
     }
 
     fn dismiss_note(&mut self) {
@@ -2536,6 +2547,11 @@ impl App {
             self.tray = super::tray::Tray::install();
         }
         if self.tray.is_none() {
+            // Without a tray, the native close event would otherwise drop the
+            // app directly, after it is too late to preserve a failed draft.
+            if !self.exit_requested && ctx.input(|input| input.viewport().close_requested()) {
+                self.quit_from_tray(ctx);
+            }
             return;
         }
         super::tray::install_wake(ctx.clone());
@@ -2665,9 +2681,14 @@ impl App {
     }
 
     fn quit_from_tray(&mut self, ctx: &egui::Context) {
+        if !self.lock() {
+            self.exit_requested = false;
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::CancelClose);
+            self.reveal_from_tray(ctx);
+            return;
+        }
         self.exit_requested = true;
         self.hidden_to_tray = false;
-        self.lock();
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -2688,8 +2709,9 @@ impl eframe::App for App {
         if !surface_open {
             self.touch();
         } else if self.is_unlocked() && self.job.is_none() && self.auto_lock.expired() {
-            self.set_status(ts!("gui.status.auto_locked"));
-            self.lock();
+            if self.lock() {
+                self.set_status(ts!("gui.status.auto_locked"));
+            }
             ctx.request_repaint();
         }
         if self.is_unlocked() {
@@ -2803,6 +2825,156 @@ mod tests {
                 title, "gui.locked.title",
                 "locale={locale:?}, common={common}"
             );
+        }
+    }
+
+    mod note_save_guards {
+        use super::*;
+
+        fn draft_app() -> (tempfile::TempDir, App, PathBuf) {
+            let temp = tempfile::tempdir().unwrap();
+            let created =
+                actions::create(&temp.path().join("vault"), 1024 * 1024, "", true).unwrap();
+            let path = created.session.path().to_owned();
+            let mut app = App::default();
+            app.path_input = path.display().to_string();
+            app.session = Some(created.session);
+            app.note = Some(super::super::super::note::NoteDraft::fresh(
+                "Note.txt".into(),
+            ));
+            app.note.as_mut().unwrap().text = "unsaved draft".into();
+            (temp, app, path)
+        }
+
+        #[test]
+        fn disk_full_preserves_existing_note_and_dirty_draft() {
+            let (_temp, mut app, path) = draft_app();
+            actions::write_note(
+                app.session.as_ref().unwrap(),
+                "Note.txt",
+                b"original",
+                false,
+            )
+            .unwrap();
+            // Capacity is rounded up to full container blocks, not the requested size.
+            let session = app.session.as_ref().unwrap();
+            let capacity =
+                crate::container::ContainerWriter::open(session.path(), session.credentials())
+                    .unwrap()
+                    .capacity_bytes() as usize;
+            let oversized = capacity.checked_add(1).unwrap();
+            let draft = app.note.as_mut().unwrap();
+            draft.exists = true;
+            draft.saved = "original".into();
+            draft.text = "x".repeat(oversized);
+            assert!(!app.lock());
+            assert!(app.is_unlocked());
+            assert_eq!(app.note.as_ref().unwrap().text.len(), oversized);
+            let (bytes, _) =
+                actions::read_vault_file(app.session.as_ref().unwrap(), "Note.txt").unwrap();
+            assert_eq!(bytes, b"original");
+            app.note.as_mut().unwrap().text = "retry succeeded".into();
+            assert!(app.lock());
+            let reopened = actions::open(&path, "", true).unwrap();
+            let (bytes, _) = actions::read_vault_file(&reopened.session, "Note.txt").unwrap();
+            assert_eq!(bytes, b"retry succeeded");
+        }
+
+        #[test]
+        fn explicit_discard_allows_lock_without_writing_a_note() {
+            let (_temp, mut app, path) = draft_app();
+            app.apply_note_command(super::super::super::note::NoteCommand::Discard);
+            assert!(app.note.is_none());
+            assert!(app.lock());
+            let reopened = actions::open(&path, "", true).unwrap();
+            assert!(reopened.entries.is_empty());
+        }
+
+        #[test]
+        fn successful_quit_saves_note_before_sending_close() {
+            let (_temp, mut app, path) = draft_app();
+            let ctx = egui::Context::default();
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| app.quit_from_tray(ui.ctx()));
+            assert!(app.exit_requested);
+            assert!(!app.is_unlocked());
+            assert!(app.note.is_none());
+            assert!(
+                output.viewport_output[&egui::ViewportId::ROOT]
+                    .commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, egui::ViewportCommand::Close))
+            );
+            let reopened = actions::open(&path, "", true).unwrap();
+            let (bytes, _) = actions::read_vault_file(&reopened.session, "Note.txt").unwrap();
+            assert_eq!(bytes, b"unsaved draft");
+        }
+
+        #[test]
+        fn root_close_without_tray_is_cancelled_when_save_fails() {
+            let (_temp, mut app, path) = draft_app();
+            app.tray_attempted = true;
+            std::fs::rename(&path, path.with_extension("offline")).unwrap();
+            let ctx = egui::Context::default();
+            let mut input = egui::RawInput::default();
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .events
+                .push(egui::ViewportEvent::Close);
+            let output = ctx.run_ui(input, |ui| app.service_tray(ui.ctx()));
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert!(
+                commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, egui::ViewportCommand::CancelClose))
+            );
+            assert!(app.is_unlocked());
+            assert!(!app.exit_requested);
+            assert_eq!(app.note.as_ref().unwrap().text, "unsaved draft");
+        }
+
+        #[test]
+        fn failed_quit_keeps_draft_without_sending_close() {
+            let (_temp, mut app, path) = draft_app();
+            std::fs::rename(&path, path.with_extension("offline")).unwrap();
+            let ctx = egui::Context::default();
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| app.quit_from_tray(ui.ctx()));
+            assert!(!app.exit_requested, "failed save must cancel quitting");
+            assert!(app.is_unlocked());
+            assert_eq!(app.note.as_ref().unwrap().text, "unsaved draft");
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert!(
+                !commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, egui::ViewportCommand::Close))
+            );
+            assert!(
+                commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, egui::ViewportCommand::CancelClose))
+            );
+        }
+
+        #[test]
+        fn failed_lock_keeps_draft_and_allows_retry() {
+            let (_temp, mut app, path) = draft_app();
+            let backup = path.with_extension("offline");
+            std::fs::rename(&path, &backup).unwrap();
+            app.lock();
+            assert!(app.is_unlocked(), "a failed save must cancel locking");
+            let draft = app.note.as_ref().expect("unsaved draft must survive");
+            assert_eq!(draft.text, "unsaved draft");
+            assert!(draft.dirty());
+            assert!(app.note_focus);
+            assert!(!app.status.is_empty());
+            std::fs::rename(&backup, &path).unwrap();
+            app.lock();
+            assert!(!app.is_unlocked());
+            assert!(app.note.is_none());
+            let reopened = actions::open(&path, "", true).unwrap();
+            let (bytes, _) = actions::read_vault_file(&reopened.session, "Note.txt").unwrap();
+            assert_eq!(bytes, b"unsaved draft");
         }
     }
 

@@ -110,6 +110,8 @@ jobs:
           cp README.md README.zh-CN.md README.ja.md LICENSE NOTICE THIRD_PARTY.md SECURITY.md \
             CONTRIBUTING.md CHANGELOG.md "$staging/"
           cp vendor/winfsp/README.md "$staging/WINFSP-INSTALL.md"
+          mkdir -p "$staging/assets/fonts"
+          cp assets/fonts/OFL-1.1.txt "$staging/assets/fonts/"
 
           if [ "${{ matrix.archive }}" = "zip" ]; then
             powershell -NoProfile -Command "Compress-Archive -Path '${staging}/*' -DestinationPath '${staging}.zip' -Force"

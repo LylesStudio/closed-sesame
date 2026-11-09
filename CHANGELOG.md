@@ -4,6 +4,8 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+## 0.1.2 — 2026-11-09
+
 ### Added
 
 - **New text file from the window and the tray panel.** One click opens an in-app note in its own window, without bringing the main window forward. Text stays in memory until you save. `Ctrl+Alt+N` creates a note in the default location, `Ctrl+Alt+O` reopens the last note, and `Ctrl+Enter` saves and closes. The shortcuts work only while the vault is unlocked.
@@ -12,6 +14,7 @@ All notable changes to this project will be documented here.
 
 ### Fixed
 
+- **Keep unsaved notes when saving fails.** Locking, tray quit, and native window close without a tray are cancelled if a dirty note cannot be saved. The vault remains unlocked and the draft stays in memory for retry or explicit discard. Automatic locking only reports success after the save and lock actually succeed. This does not provide recovery after a forced process termination or power loss.
 - **The tray panel stays on the monitor that holds the tray icon** when the main window moves to another display, including monitors left or right of the origin and monitors with a different scale. A DPI change no longer resizes the main window a second time, and a window larger than the display it just entered is fitted back. Content protection is applied again after the move.
 
 ## 0.1.1 — 2026-10-23
